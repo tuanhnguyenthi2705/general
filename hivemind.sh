@@ -90,5 +90,4 @@ echo "=== 🔄 Reloading and starting service..."
 systemctl daemon-reload
 systemctl enable hivemind
 systemctl restart hivemind
-sleep 30
-journalctl -u hivemind -f
+echo "journalctl -u hivemind -f"
