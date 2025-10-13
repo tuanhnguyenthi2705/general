@@ -20,8 +20,7 @@ fi
 cd hivemind
 
 echo "=== 🧩 Installing Hivemind in editable mode..."
-pip install -e .
-
+HIVEMIND_BUILDGO=1 pip install -e .
 echo "=== 🧩 Compiling protobuf files..."
 python3 -m grpc_tools.protoc -I hivemind/proto \
     --python_out=hivemind/proto \
