@@ -103,8 +103,6 @@ update_bootnode() {
     # Tim va thay the dong initial_peers bang bootnode moi
     # Su dung sed de tim dong bat dau bang - '/ip4 va thay the
     sed -i "/^[[:space:]]*-[[:space:]]*'\/ip4/c\    - '$RANDOM_BOOTNODE'" "$CONFIG_FILE"
-    echo "$(date) - Bootnode: $RANDOM_BOOTNODE"
-    echo "$(date) - ============================================"
 }
 
 # Ham copy file va restart
@@ -184,7 +182,7 @@ copy_and_restart() {
 }
 
 # Lan dau dung folder 1
-echo "$(date) - Dung folder 1"
+echo "$(date) - Folder 1"
 copy_and_restart 1
 
 # Bat dau vong lap tu folder 2
@@ -206,13 +204,13 @@ while true; do
             CURRENT_INDEX=1
         fi
         
-        echo "$(date) - Phat hien Joining round, copy & restart voi folder $CURRENT_INDEX"
+        echo "$(date): Folder $CURRENT_INDEX - $RANDOM_BOOTNODE"
         copy_and_restart "$CURRENT_INDEX"
         ((CURRENT_INDEX++))
     else
-        # Neu qua 10 phut khong phat hien Joining round thi chuyen index tiep
+        # Neu qua thoi gian khong phat hien Joining round thi chuyen index tiep
         if (( current_time - last_detect_time >= TIMEOUT_SECONDS )); then
-            echo "$(date) - Khong phat hien Joining round trong 10 phut, chuyen sang thu muc $CURRENT_INDEX"
+            echo "$(date) - Error, chuyen folder $CURRENT_INDEX - $RANDOM_BOOTNODE"
             
             # Reset index neu vuot qua MAX_FOLDER truoc khi dung
             if (( CURRENT_INDEX > MAX_FOLDER )); then
