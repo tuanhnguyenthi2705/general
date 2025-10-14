@@ -18,6 +18,10 @@ SRC_TEMP="$BASE_DIR/temp-data"
 DEST_DIR="/root/rl-swarm"
 CONFIG_FILE="$DEST_DIR/rgym_exp/config/rg-swarm.yaml"
 BOOTNODES_FILE="/home/$USER_NAME/gensyn/run/bootnodes.txt"
+USED_BOOTNODES_FILE="/tmp/used_bootnodes_$$.txt"
+
+# Tạo file tạm để lưu bootnode đã dùng
+touch "$USED_BOOTNODES_FILE"
 
 # --- 2. Kiểm tra tồn tại của các thư mục cần thiết ---
 if [[ ! -d "$BASE_DIR" ]]; then
@@ -34,8 +38,10 @@ fi
 echo "📂 Copy dữ liệu từ $SRC_TEMP đến $DEST_DIR/modal-login ..."
 cp -r "$SRC_TEMP" "$DEST_DIR/modal-login"
 
-# --- 4. Hàm chọn ngẫu nhiên bootnode và cập nhật vào config ---
+# --- 4. Hàm chọn ngẫu nhiên bootnode MỚI và cập nhật vào config ---
 update_bootnode() {
+  echo "🎲 Chọn bootnode ngẫu nhiên..."
+  
   # Kiểm tra file bootnodes có tồn tại không
   if [ ! -f "$BOOTNODES_FILE" ]; then
     echo "⚠️ CẢNH BÁO: Không tìm thấy file $BOOTNODES_FILE - giữ nguyên giá trị cũ"
@@ -48,24 +54,59 @@ update_bootnode() {
     return
   fi
   
-  # Lấy ngẫu nhiên một dòng từ file bootnodes.txt (bỏ qua dòng trống)
-  RANDOM_BOOTNODE=$(grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" | shuf -n 1)
+  # Tạo file tạm chứa các bootnode chưa dùng
+  TEMP_AVAILABLE="/tmp/available_bootnodes_$$.txt"
+  
+  # Lấy tất cả bootnode (bỏ dòng trống)
+  grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" > "$TEMP_AVAILABLE"
+  
+  # Loại bỏ các bootnode đã dùng
+  if [ -s "$USED_BOOTNODES_FILE" ]; then
+    while IFS= read -r used_bootnode; do
+      grep -v "^${used_bootnode}$" "$TEMP_AVAILABLE" > "${TEMP_AVAILABLE}.tmp" || true
+      mv "${TEMP_AVAILABLE}.tmp" "$TEMP_AVAILABLE" || true
+    done < "$USED_BOOTNODES_FILE"
+  fi
+  
+  # Đếm số bootnode còn lại
+  AVAILABLE_COUNT=$(wc -l < "$TEMP_AVAILABLE" 2>/dev/null || echo "0")
+  
+  # Nếu hết bootnode, reset lại danh sách
+  if [ "$AVAILABLE_COUNT" -eq 0 ]; then
+    echo "ℹ️ Đã dùng hết bootnode, reset danh sách..."
+    > "$USED_BOOTNODES_FILE"  # Xóa file đã dùng
+    grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" > "$TEMP_AVAILABLE"
+    AVAILABLE_COUNT=$(wc -l < "$TEMP_AVAILABLE")
+  fi
+  
+  # Chọn ngẫu nhiên một bootnode
+  RANDOM_BOOTNODE=$(shuf -n 1 "$TEMP_AVAILABLE")
   
   if [ -z "$RANDOM_BOOTNODE" ]; then
     echo "⚠️ CẢNH BÁO: Không lấy được bootnode, dùng bootnode cũ"
+    rm -f "$TEMP_AVAILABLE"
     return
   fi
   
+  # Lưu bootnode vừa chọn vào danh sách đã dùng
+  echo "$RANDOM_BOOTNODE" >> "$USED_BOOTNODES_FILE"
+  
+  # Dọn dẹp file tạm
+  rm -f "$TEMP_AVAILABLE"
+  
   # Backup file config trước khi sửa
-  cp "$CONFIG_FILE" "$CONFIG_FILE.backup"
+  cp "$CONFIG_FILE" "$CONFIG_FILE.backup" 2>/dev/null || true
   
   # Lấy bootnode cũ trước khi thay thế
-  OLD_BOOTNODE=$(grep -E "^[[:space:]]*-[[:space:]]*'/ip4" "$CONFIG_FILE" | head -1 | sed "s/^[[:space:]]*-[[:space:]]*//")
+  OLD_BOOTNODE=$(grep -E "^[[:space:]]*-[[:space:]]*'/ip4" "$CONFIG_FILE" 2>/dev/null | head -1 | sed "s/^[[:space:]]*-[[:space:]]*//")
   
   # Tìm và thay thế dòng initial_peers bằng bootnode mới
   sed -i "/^[[:space:]]*-[[:space:]]*'\/ip4/c\    - '$RANDOM_BOOTNODE'" "$CONFIG_FILE"
   
-  echo "🔄 Đã cập nhật bootnode:"
+  TOTAL_BOOTNODES=$(grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" | wc -l)
+  USED_COUNT=$(wc -l < "$USED_BOOTNODES_FILE")
+  
+  echo "🔄 Đã cập nhật bootnode ($USED_COUNT/$TOTAL_BOOTNODES đã dùng):"
   echo "   Cũ: $OLD_BOOTNODE"
   echo "   Mới: $RANDOM_BOOTNODE"
 }
@@ -74,7 +115,6 @@ update_bootnode() {
 run_cycle() {
   local PEM_SUFFIX=$1
   
-  echo "🎲 Chọn bootnode ngẫu nhiên..."
   update_bootnode
   
   echo "🔄 Khởi động lại rl-swarm..."
@@ -116,6 +156,9 @@ for i in {8..15}; do
   echo "═══════════════════════════════════════"
   run_cycle $i
 done
+
+# Dọn dẹp file tạm
+rm -f "$USED_BOOTNODES_FILE"
 
 echo ""
 echo "🎯 ✅ HOÀN TẤT — Đã tạo 8 file swarm.pem từ swarm.pem.8 đến swarm.pem.15"
