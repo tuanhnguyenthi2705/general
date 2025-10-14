@@ -1,0 +1,123 @@
+#!/bin/bash
+set -euo pipefail
+
+# --- 1. Kiểm tra và yêu cầu nhập FOLDER nếu chưa có ---
+if [[ -z "${FOLDER:-}" ]]; then
+  read -p "📁 Nhập số thư mục FOLDER (ví dụ: 01, 02, 03...): " FOLDER
+  if [[ -z "$FOLDER" ]]; then
+    echo "❌ FOLDER không được để trống! Script dừng lại."
+    exit 1
+  fi
+fi
+
+echo "✅ Sử dụng FOLDER: $FOLDER"
+
+USER_NAME=$(logname)
+BASE_DIR="/home/$USER_NAME/gensyn/$FOLDER"
+SRC_TEMP="$BASE_DIR/temp-data"
+DEST_DIR="/root/rl-swarm"
+CONFIG_FILE="$DEST_DIR/rgym_exp/config/rg-swarm.yaml"
+BOOTNODES_FILE="/home/$USER_NAME/gensyn/run/bootnodes.txt"
+
+# --- 2. Kiểm tra tồn tại của các thư mục cần thiết ---
+if [[ ! -d "$BASE_DIR" ]]; then
+  echo "❌ Thư mục $BASE_DIR không tồn tại!"
+  exit 1
+fi
+
+if [[ ! -d "$SRC_TEMP" ]]; then
+  echo "❌ Thư mục $SRC_TEMP không tồn tại!"
+  exit 1
+fi
+
+# --- 3. Copy temp-data ---
+echo "📂 Copy dữ liệu từ $SRC_TEMP đến $DEST_DIR/modal-login ..."
+cp -r "$SRC_TEMP" "$DEST_DIR/modal-login"
+
+# --- 4. Hàm chọn ngẫu nhiên bootnode và cập nhật vào config ---
+update_bootnode() {
+  # Kiểm tra file bootnodes có tồn tại không
+  if [ ! -f "$BOOTNODES_FILE" ]; then
+    echo "⚠️ CẢNH BÁO: Không tìm thấy file $BOOTNODES_FILE - giữ nguyên giá trị cũ"
+    return
+  fi
+  
+  # Kiểm tra file có rỗng không
+  if [ ! -s "$BOOTNODES_FILE" ]; then
+    echo "⚠️ CẢNH BÁO: File bootnode rỗng, dùng bootnode cũ"
+    return
+  fi
+  
+  # Lấy ngẫu nhiên một dòng từ file bootnodes.txt (bỏ qua dòng trống)
+  RANDOM_BOOTNODE=$(grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" | shuf -n 1)
+  
+  if [ -z "$RANDOM_BOOTNODE" ]; then
+    echo "⚠️ CẢNH BÁO: Không lấy được bootnode, dùng bootnode cũ"
+    return
+  fi
+  
+  # Backup file config trước khi sửa
+  cp "$CONFIG_FILE" "$CONFIG_FILE.backup"
+  
+  # Lấy bootnode cũ trước khi thay thế
+  OLD_BOOTNODE=$(grep -E "^[[:space:]]*-[[:space:]]*'/ip4" "$CONFIG_FILE" | head -1 | sed "s/^[[:space:]]*-[[:space:]]*//")
+  
+  # Tìm và thay thế dòng initial_peers bằng bootnode mới
+  sed -i "/^[[:space:]]*-[[:space:]]*'\/ip4/c\    - '$RANDOM_BOOTNODE'" "$CONFIG_FILE"
+  
+  echo "🔄 Đã cập nhật bootnode:"
+  echo "   Cũ: $OLD_BOOTNODE"
+  echo "   Mới: $RANDOM_BOOTNODE"
+}
+
+# --- 5. Hàm chạy 1 vòng khởi động - kiểm tra - dừng - di chuyển ---
+run_cycle() {
+  local PEM_SUFFIX=$1
+  
+  echo "🎲 Chọn bootnode ngẫu nhiên..."
+  update_bootnode
+  
+  echo "🔄 Khởi động lại rl-swarm..."
+  systemctl restart rl-swarm
+  
+  echo "⏳ Đang chờ file swarm.pem xuất hiện..."
+  SRC_PEM="$DEST_DIR/swarm.pem"
+  
+  while true; do
+    if [[ -f "$SRC_PEM" ]]; then
+      echo "✅ Phát hiện swarm.pem — dừng rl-swarm..."
+      systemctl stop rl-swarm
+      break
+    fi
+    sleep 5
+  done
+  
+  # --- Di chuyển swarm.pem ---
+  DEST_PEM="$BASE_DIR/swarm.pem.$PEM_SUFFIX"
+  
+  if [[ -f "$SRC_PEM" ]]; then
+    echo "📦 Di chuyển $SRC_PEM → $DEST_PEM"
+    mv "$SRC_PEM" "$DEST_PEM"
+  else
+    echo "⚠️ Không tìm thấy $SRC_PEM!"
+  fi
+  
+  echo "✅ Vòng $PEM_SUFFIX hoàn tất"
+  echo ""
+}
+
+# --- 6. Chạy 8 vòng (từ 8 đến 15) ---
+echo "🚀 Bắt đầu chạy 8 vòng để tạo swarm.pem.8 đến swarm.pem.15"
+echo ""
+
+for i in {8..15}; do
+  echo "═══════════════════════════════════════"
+  echo "🔢 Vòng $((i-7))/8 - Tạo swarm.pem.$i"
+  echo "═══════════════════════════════════════"
+  run_cycle $i
+done
+
+echo ""
+echo "🎯 ✅ HOÀN TẤT — Đã tạo 8 file swarm.pem từ swarm.pem.8 đến swarm.pem.15"
+echo "📁 Vị trí: $BASE_DIR/"
+echo "✨ Folder: $FOLDER"
