@@ -18,10 +18,6 @@ SRC_TEMP="$BASE_DIR/temp-data"
 DEST_DIR="/root/rl-swarm"
 CONFIG_FILE="$DEST_DIR/rgym_exp/config/rg-swarm.yaml"
 BOOTNODES_FILE="/home/$USER_NAME/gensyn/run/bootnodes.txt"
-USED_BOOTNODES_FILE="/tmp/used_bootnodes_$$.txt"
-
-# Tạo file tạm để lưu bootnode đã dùng
-touch "$USED_BOOTNODES_FILE"
 
 # --- 2. Kiểm tra tồn tại của các thư mục cần thiết ---
 if [[ ! -d "$BASE_DIR" ]]; then
@@ -34,65 +30,26 @@ if [[ ! -d "$SRC_TEMP" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$BOOTNODES_FILE" ]]; then
+  echo "❌ File $BOOTNODES_FILE không tồn tại!"
+  exit 1
+fi
+
 # --- 3. Copy temp-data ---
 echo "📂 Copy dữ liệu từ $SRC_TEMP đến $DEST_DIR/modal-login ..."
 cp -r "$SRC_TEMP" "$DEST_DIR/modal-login"
 
-# --- 4. Hàm chọn ngẫu nhiên bootnode MỚI và cập nhật vào config ---
+# --- 4. Hàm chọn ngẫu nhiên bootnode và cập nhật vào config ---
 update_bootnode() {
   echo "🎲 Chọn bootnode ngẫu nhiên..."
   
-  # Kiểm tra file bootnodes có tồn tại không
-  if [ ! -f "$BOOTNODES_FILE" ]; then
-    echo "⚠️ CẢNH BÁO: Không tìm thấy file $BOOTNODES_FILE - giữ nguyên giá trị cũ"
-    return
-  fi
-  
-  # Kiểm tra file có rỗng không
-  if [ ! -s "$BOOTNODES_FILE" ]; then
-    echo "⚠️ CẢNH BÁO: File bootnode rỗng, dùng bootnode cũ"
-    return
-  fi
-  
-  # Tạo file tạm chứa các bootnode chưa dùng
-  TEMP_AVAILABLE="/tmp/available_bootnodes_$$.txt"
-  
-  # Lấy tất cả bootnode (bỏ dòng trống)
-  grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" > "$TEMP_AVAILABLE"
-  
-  # Loại bỏ các bootnode đã dùng
-  if [ -s "$USED_BOOTNODES_FILE" ]; then
-    while IFS= read -r used_bootnode; do
-      grep -v "^${used_bootnode}$" "$TEMP_AVAILABLE" > "${TEMP_AVAILABLE}.tmp" || true
-      mv "${TEMP_AVAILABLE}.tmp" "$TEMP_AVAILABLE" || true
-    done < "$USED_BOOTNODES_FILE"
-  fi
-  
-  # Đếm số bootnode còn lại
-  AVAILABLE_COUNT=$(wc -l < "$TEMP_AVAILABLE" 2>/dev/null || echo "0")
-  
-  # Nếu hết bootnode, reset lại danh sách
-  if [ "$AVAILABLE_COUNT" -eq 0 ]; then
-    echo "ℹ️ Đã dùng hết bootnode, reset danh sách..."
-    > "$USED_BOOTNODES_FILE"  # Xóa file đã dùng
-    grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" > "$TEMP_AVAILABLE"
-    AVAILABLE_COUNT=$(wc -l < "$TEMP_AVAILABLE")
-  fi
-  
-  # Chọn ngẫu nhiên một bootnode
-  RANDOM_BOOTNODE=$(shuf -n 1 "$TEMP_AVAILABLE")
+  # Chọn ngẫu nhiên một bootnode (bỏ qua dòng trống)
+  RANDOM_BOOTNODE=$(grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" | shuf -n 1)
   
   if [ -z "$RANDOM_BOOTNODE" ]; then
-    echo "⚠️ CẢNH BÁO: Không lấy được bootnode, dùng bootnode cũ"
-    rm -f "$TEMP_AVAILABLE"
-    return
+    echo "⚠️ CẢNH BÁO: Không lấy được bootnode"
+    return 1
   fi
-  
-  # Lưu bootnode vừa chọn vào danh sách đã dùng
-  echo "$RANDOM_BOOTNODE" >> "$USED_BOOTNODES_FILE"
-  
-  # Dọn dẹp file tạm
-  rm -f "$TEMP_AVAILABLE"
   
   # Backup file config trước khi sửa
   cp "$CONFIG_FILE" "$CONFIG_FILE.backup" 2>/dev/null || true
@@ -103,10 +60,7 @@ update_bootnode() {
   # Tìm và thay thế dòng initial_peers bằng bootnode mới
   sed -i "/^[[:space:]]*-[[:space:]]*'\/ip4/c\    - '$RANDOM_BOOTNODE'" "$CONFIG_FILE"
   
-  TOTAL_BOOTNODES=$(grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" | wc -l)
-  USED_COUNT=$(wc -l < "$USED_BOOTNODES_FILE")
-  
-  echo "🔄 Đã cập nhật bootnode ($USED_COUNT/$TOTAL_BOOTNODES đã dùng):"
+  echo "🔄 Đã cập nhật bootnode:"
   echo "   Cũ: $OLD_BOOTNODE"
   echo "   Mới: $RANDOM_BOOTNODE"
 }
@@ -123,12 +77,22 @@ run_cycle() {
   echo "⏳ Đang chờ file swarm.pem xuất hiện..."
   SRC_PEM="$DEST_DIR/swarm.pem"
   
+  # Chờ tối đa 5 phút (60 lần x 5 giây)
+  COUNTER=0
   while true; do
     if [[ -f "$SRC_PEM" ]]; then
       echo "✅ Phát hiện swarm.pem — dừng rl-swarm..."
       systemctl stop rl-swarm
       break
     fi
+    
+    COUNTER=$((COUNTER + 1))
+    if [ $COUNTER -gt 60 ]; then
+      echo "⚠️ TIMEOUT: Chờ quá lâu, bỏ qua vòng này"
+      systemctl stop rl-swarm
+      return 1
+    fi
+    
     sleep 5
   done
   
@@ -138,11 +102,12 @@ run_cycle() {
   if [[ -f "$SRC_PEM" ]]; then
     echo "📦 Di chuyển $SRC_PEM → $DEST_PEM"
     mv "$SRC_PEM" "$DEST_PEM"
+    echo "✅ Vòng $PEM_SUFFIX hoàn tất"
   else
     echo "⚠️ Không tìm thấy $SRC_PEM!"
+    return 1
   fi
   
-  echo "✅ Vòng $PEM_SUFFIX hoàn tất"
   echo ""
 }
 
@@ -150,17 +115,26 @@ run_cycle() {
 echo "🚀 Bắt đầu chạy 8 vòng để tạo swarm.pem.8 đến swarm.pem.15"
 echo ""
 
+SUCCESS_COUNT=0
+FAIL_COUNT=0
+
 for i in {8..15}; do
   echo "═══════════════════════════════════════"
   echo "🔢 Vòng $((i-7))/8 - Tạo swarm.pem.$i"
   echo "═══════════════════════════════════════"
-  run_cycle $i
+  
+  if run_cycle $i; then
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+  else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    echo "❌ Vòng $i thất bại"
+    echo ""
+  fi
 done
 
-# Dọn dẹp file tạm
-rm -f "$USED_BOOTNODES_FILE"
-
 echo ""
-echo "🎯 ✅ HOÀN TẤT — Đã tạo 8 file swarm.pem từ swarm.pem.8 đến swarm.pem.15"
+echo "🎯 ✅ HOÀN TẤT"
+echo "   Thành công: $SUCCESS_COUNT/8"
+echo "   Thất bại: $FAIL_COUNT/8"
 echo "📁 Vị trí: $BASE_DIR/"
 echo "✨ Folder: $FOLDER"
