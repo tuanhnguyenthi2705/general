@@ -1,16 +1,36 @@
 #!/bin/bash
 set -euo pipefail
+systemctl stop rl-swarm rl-swarm2
+rm -rf /root/rl-swarm/swarm.pem /root/rl-swarm/modal-login/temp-data/*
+ls /home/$(logname)/gensyn/
 
-# --- 1. Kiểm tra và yêu cầu nhập FOLDER nếu chưa có ---
+# --- 1. Kiem tra va yeu cau nhap FOLDER neu chua co ---
 if [[ -z "${FOLDER:-}" ]]; then
-  read -p "📁 Nhập số thư mục FOLDER (ví dụ: 01, 02, 03...): " FOLDER
+  read -p "Nhap so FOLDER chua temp-data can chay: " FOLDER
   if [[ -z "$FOLDER" ]]; then
-    echo "❌ FOLDER không được để trống! Script dừng lại."
+    echo "FOLDER khong duoc de trong! Script dung lai."
     exit 1
   fi
 fi
 
-echo "✅ Sử dụng FOLDER: $FOLDER"
+echo "Su dung FOLDER: $FOLDER"
+
+read -p "Nhap so luong swarm.pem muon tao: " NUM_FILES
+if [[ -z "$NUM_FILES" ]] || ! [[ "$NUM_FILES" =~ ^[0-9]+$ ]] || [ "$NUM_FILES" -lt 1 ]; then
+  echo "So luong khong hop le! Phai la so nguyen duong."
+  exit 1
+fi
+
+read -p "Nhap so x bat dau (x trong swarm.pem.x): " START_NUM
+if [[ -z "$START_NUM" ]] || ! [[ "$START_NUM" =~ ^[0-9]+$ ]]; then
+  echo "So thu tu khong hop le! Phai la so nguyen khong am."
+  exit 1
+fi
+
+# Tinh so ket thuc
+END_NUM=$((START_NUM + NUM_FILES - 1))
+
+echo "Se tao $NUM_FILES file tu swarm.pem.$START_NUM den swarm.pem.$END_NUM"
 
 USER_NAME=$(logname)
 BASE_DIR="/home/$USER_NAME/gensyn/$FOLDER"
@@ -19,76 +39,73 @@ DEST_DIR="/root/rl-swarm"
 CONFIG_FILE="$DEST_DIR/rgym_exp/config/rg-swarm.yaml"
 BOOTNODES_FILE="/home/$USER_NAME/gensyn/run/bootnodes.txt"
 
-# --- 2. Kiểm tra tồn tại của các thư mục cần thiết ---
+# Kiem tra ton tai cua cac thu muc can thiet ---
 if [[ ! -d "$BASE_DIR" ]]; then
-  echo "❌ Thư mục $BASE_DIR không tồn tại!"
+  echo "Thu muc $BASE_DIR khong ton tai!"
   exit 1
 fi
 
 if [[ ! -d "$SRC_TEMP" ]]; then
-  echo "❌ Thư mục $SRC_TEMP không tồn tại!"
+  echo "Thu muc $SRC_TEMP khong ton tai!"
   exit 1
 fi
 
 if [[ ! -f "$BOOTNODES_FILE" ]]; then
-  echo "❌ File $BOOTNODES_FILE không tồn tại!"
+  echo "File $BOOTNODES_FILE khong ton tai!"
   exit 1
 fi
 
-# --- 3. Copy temp-data ---
-echo "📂 Copy dữ liệu từ $SRC_TEMP đến $DEST_DIR/modal-login ..."
+# Copy temp-data ---
+echo "Copy du lieu tu $SRC_TEMP den $DEST_DIR/modal-login ..."
 cp -r "$SRC_TEMP" "$DEST_DIR/modal-login"
 
-# --- 4. Hàm chọn ngẫu nhiên bootnode và cập nhật vào config ---
+# Ham chon ngau nhien bootnode va cap nhat vao config ---
 update_bootnode() {
-  echo "🎲 Chọn bootnode ngẫu nhiên..."
+  echo "Chon bootnode ngau nhien..."
   
-  # Chọn ngẫu nhiên một bootnode (bỏ qua dòng trống)
+  # Chon ngau nhien mot bootnode (bo qua dong trong)
   RANDOM_BOOTNODE=$(grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" | shuf -n 1)
   
   if [ -z "$RANDOM_BOOTNODE" ]; then
-    echo "⚠️ CẢNH BÁO: Không lấy được bootnode"
+    echo "CANH BAO: Khong lay duoc bootnode"
     return 1
   fi
   
-  # Backup file config trước khi sửa
+  # Backup file config truoc khi sua
   cp "$CONFIG_FILE" "$CONFIG_FILE.backup" 2>/dev/null || true
   
-  # Lấy bootnode cũ trước khi thay thế
+  # Lay bootnode cu truoc khi thay the
   OLD_BOOTNODE=$(grep -E "^[[:space:]]*-[[:space:]]*'/ip4" "$CONFIG_FILE" 2>/dev/null | head -1 | sed "s/^[[:space:]]*-[[:space:]]*//")
   
-  # Tìm và thay thế dòng initial_peers bằng bootnode mới
+  # Tim va thay the dong initial_peers bang bootnode moi
   sed -i "/^[[:space:]]*-[[:space:]]*'\/ip4/c\    - '$RANDOM_BOOTNODE'" "$CONFIG_FILE"
   
-  echo "🔄 Đã cập nhật bootnode:"
-  echo "   Cũ: $OLD_BOOTNODE"
-  echo "   Mới: $RANDOM_BOOTNODE"
+  echo "   Bootnode: $RANDOM_BOOTNODE"
 }
 
-# --- 5. Hàm chạy 1 vòng khởi động - kiểm tra - dừng - di chuyển ---
+# Ham chay 1 vong khoi dong - kiem tra - dung - di chuyen ---
 run_cycle() {
   local PEM_SUFFIX=$1
   
   update_bootnode
-  
-  echo "🔄 Khởi động lại rl-swarm..."
+
   systemctl restart rl-swarm
   
-  echo "⏳ Đang chờ file swarm.pem xuất hiện..."
+  echo "Dang cho file swarm.pem xuat hien..."
   SRC_PEM="$DEST_DIR/swarm.pem"
   
-  # Chờ tối đa 5 phút (60 lần x 5 giây)
+  # Cho toi da 5 phut (60 lan x 5 giay)
   COUNTER=0
   while true; do
     if [[ -f "$SRC_PEM" ]]; then
-      echo "✅ Phát hiện swarm.pem — dừng rl-swarm..."
+      echo "Phat hien swarm.pem"
       systemctl stop rl-swarm
       break
     fi
     
     COUNTER=$((COUNTER + 1))
     if [ $COUNTER -gt 60 ]; then
-      echo "⚠️ TIMEOUT: Chờ quá lâu, bỏ qua vòng này"
+      echo "TIMEOUT: Cho qua lau, bo qua vong nay"
       systemctl stop rl-swarm
       return 1
     fi
@@ -96,45 +113,45 @@ run_cycle() {
     sleep 5
   done
   
-  # --- Di chuyển swarm.pem ---
+  # --- Di chuyen swarm.pem ---
   DEST_PEM="$BASE_DIR/swarm.pem.$PEM_SUFFIX"
   
   if [[ -f "$SRC_PEM" ]]; then
-    echo "📦 Di chuyển $SRC_PEM → $DEST_PEM"
+    echo "Di chuyen $SRC_PEM -> $DEST_PEM"
     mv "$SRC_PEM" "$DEST_PEM"
-    echo "✅ Vòng $PEM_SUFFIX hoàn tất"
+    echo "Vong $PEM_SUFFIX hoan tat"
   else
-    echo "⚠️ Không tìm thấy $SRC_PEM!"
+    echo "CANH BAO: Khong tim thay $SRC_PEM!"
     return 1
   fi
   
   echo ""
 }
 
-# --- 6. Chạy 8 vòng (từ 8 đến 15) ---
-echo "🚀 Bắt đầu chạy 8 vòng để tạo swarm.pem.8 đến swarm.pem.15"
+# Chay vong lap theo so luong da nhap ---
+echo "Bat dau chay $NUM_FILES vong de tao swarm.pem.$START_NUM den swarm.pem.$END_NUM"
 echo ""
 
 SUCCESS_COUNT=0
 FAIL_COUNT=0
 
-for i in {8..15}; do
-  echo "═══════════════════════════════════════"
-  echo "🔢 Vòng $((i-7))/8 - Tạo swarm.pem.$i"
-  echo "═══════════════════════════════════════"
+CURRENT_NUM=$START_NUM
+for ((CYCLE=1; CYCLE<=NUM_FILES; CYCLE++)); do
+  echo "Vong $CYCLE/$NUM_FILES - Tao swarm.pem.$CURRENT_NUM"
   
-  if run_cycle $i; then
+  if run_cycle $CURRENT_NUM; then
     SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
   else
     FAIL_COUNT=$((FAIL_COUNT + 1))
-    echo "❌ Vòng $i thất bại"
+    echo "Vong $CURRENT_NUM that bai"
     echo ""
   fi
+  
+  CURRENT_NUM=$((CURRENT_NUM + 1))
 done
 
-echo ""
-echo "🎯 ✅ HOÀN TẤT"
-echo "   Thành công: $SUCCESS_COUNT/8"
-echo "   Thất bại: $FAIL_COUNT/8"
-echo "📁 Vị trí: $BASE_DIR/"
-echo "✨ Folder: $FOLDER"
+echo "HOAN TAT"
+echo "   Thanh cong: $SUCCESS_COUNT/$NUM_FILES"
+echo "   That bai: $FAIL_COUNT/$NUM_FILES"
+echo "Vi tri: $BASE_DIR/"
+echo "Folder: $FOLDER"
