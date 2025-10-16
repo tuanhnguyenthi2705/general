@@ -61,7 +61,7 @@ WantedBy=multi-user.target
 EOF
 
 # ===================== SCRIPT: auto.run =====================
-# Lưu ý: kết thúc here-doc PHẢI là 'AUTORUN_EOF' đứng một mình, không thụt lề, có newline sau đó.
+# Lưu ý: marker kết thúc here-doc PHẢI là 'AUTORUN_EOF' đứng một mình, không thụt lề, có newline sau đó.
 cat > /root/gensyn/run/auto.run <<'AUTORUN_EOF'
 #!/bin/bash
 set -euo pipefail
