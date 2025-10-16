@@ -23,7 +23,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/root/rl-swarm
-ExecStart=/bin/bash -lc 'source /root/rl-swarm/.venv/bin/activate && ./run_rl_swarm.sh'
+ExecStart=/bin/bash -lc 'source /root/rl-swarm/.venv/bin/activate && ./run_first.sh'
 Restart=always
 RestartSec=5
 User=root
