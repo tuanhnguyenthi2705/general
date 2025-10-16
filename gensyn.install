@@ -1,10 +1,8 @@
 #!/bin/bash
 set -euo pipefail
-
-# ========================= Helpers & guard =========================
 trap 'echo "[ERROR] Failed at line $LINENO"; exit 1' ERR
 
-# ===== Xác định USER_HOME đúng (an toàn khi sudo/cron/TTY) =====
+# ========================= Detect USER_HOME safely =========================
 LOGNAME=$(logname 2>/dev/null || true)
 [ -z "${LOGNAME:-}" ] && LOGNAME="${SUDO_USER:-root}"
 if [ "$LOGNAME" = "root" ]; then
@@ -13,7 +11,7 @@ else
   USER_HOME="/home/$LOGNAME"
 fi
 
-# ===== Thư mục dữ liệu =====
+# ========================= Data dir =========================
 mkdir -p "$USER_HOME/gensyn/run"
 
 # ===================== SERVICE: rl-swarm =====================
@@ -26,7 +24,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/root/rl-swarm
-# Nếu bạn muốn chạy script khác, đổi ./run_first.sh tại đây
+# Đổi ./run_first.sh thành script phù hợp nếu bạn muốn
 ExecStart=/bin/bash -lc 'source /root/rl-swarm/.venv/bin/activate && ./run_first.sh'
 Restart=always
 RestartSec=5
@@ -40,7 +38,7 @@ WantedBy=multi-user.target
 EOF
 
 # ===================== SERVICE: rl-swarm2 =====================
-# Dùng %h (home của User=) để ghép đường dẫn động, tránh hardcode sai
+# Dùng %h và %u để tránh hardcode đường dẫn khi chạy dưới root
 cat << EOF > /etc/systemd/system/rl-swarm2.service
 [Unit]
 Description=Auto Run Gensyn Script (folder cycler)
@@ -63,40 +61,38 @@ WantedBy=multi-user.target
 EOF
 
 # ===================== SCRIPT: auto.run =====================
-# Dùng here-doc có QUOTE chuẩn 'AUTORUN_EOF' để nội dung literal 100%
+# Lưu ý: dùng here-doc quoted 'AUTORUN_EOF' để giữ nguyên nội dung literal
 cat << 'AUTORUN_EOF' > /root/gensyn/run/auto.run
 #!/bin/bash
 set -euo pipefail
 
-# --------- Cấu hình đường dẫn & file ----------
-BASE_DIR="/root/gensyn/run"          # nguồn dữ liệu: /root/gensyn/run/<idx>/
-TARGET_DIR="/root/rl-swarm"          # repo rl-swarm
+# --------- Config paths ----------
+BASE_DIR="/root/gensyn/run"          # source: /root/gensyn/run/<idx>/
+TARGET_DIR="/root/rl-swarm"          # rl-swarm repo
 LOGIN_SUBDIR="modal-login"
 BOOTNODES_FILE="$BASE_DIR/bootnodes.txt"
 CONFIG_FILE="$TARGET_DIR/rgym_exp/config/rg-swarm.yaml"
 
-# --------- Tiện ích nhỏ ----------
 log() { printf "%s - %s\n" "$(date '+%F %T')" "$*"; }
 
-# --------- Tìm số folder lớn nhất (tên là số 1..N) ----------
+# --------- Detect max numeric folder 1..N ----------
 MAX_FOLDER="$(find "$BASE_DIR" -maxdepth 1 -type d -regex '.*/[0-9]+' -printf '%f\n' | sort -n | tail -1 || true)"
 MAX_FOLDER="${MAX_FOLDER:-1}"
 log "Phát hiện $MAX_FOLDER folder, sẽ lặp 1..$MAX_FOLDER"
 
-# --------- Đảm bảo jq có sẵn (để đọc JSON an toàn) ----------
+# --------- Ensure jq exists (for JSON parsing) ----------
 if ! command -v jq >/dev/null 2>&1; then
   apt-get update -y >/dev/null 2>&1 || true
   apt-get install -y jq >/dev/null 2>&1 || true
 fi
 
-# --------- Cập nhật bootnode ngẫu nhiên vào YAML ----------
+# --------- Update bootnode inside YAML ----------
 update_bootnode() {
   if [ ! -s "$BOOTNODES_FILE" ]; then
     log "CẢNH BÁO: $BOOTNODES_FILE không tồn tại/đang rỗng; giữ bootnode cũ"
     return 0
   fi
 
-  # Bỏ dòng trống, chọn ngẫu nhiên 1 dòng
   local pick
   pick="$(grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" | shuf -n 1 || true)"
   if [ -z "${pick:-}" ]; then
@@ -104,232 +100,17 @@ update_bootnode() {
     return 0
   fi
 
-  # Sao lưu quay vòng 5 bản
+  # Backup rotation (keep latest 5)
   cp -f "$CONFIG_FILE" "$CONFIG_FILE.backup.$(date +%Y%m%d%H%M%S)" || true
   ls -1t "$CONFIG_FILE".backup.* 2>/dev/null | tail -n +6 | xargs -r rm -f
 
-  # Thay đúng 1 dòng đầu trong danh sách peers có dạng: "- '/ip4..."
-  # Dùng awk để ít phụ thuộc indent; giữ nguyên các dòng khác.
+  # Replace only the first "- '/ip4..." entry under initial_peers:
   awk -v BN="$pick" '
     BEGIN { replaced=0; in_peers=0 }
-    # Phát hiện block initial_peers:
     /^[[:space:]]*initial_peers:[[:space:]]*$/ { in_peers=1; print; next }
-    # Trong block peers: dòng đầu dạng "- \x27/ip4..." sẽ bị thay
     in_peers==1 && /^[[:space:]]*-[[:space:]]*'\''\/ip4/ && replaced==0 {
       sub(/-.*/, "- \x27" BN "\x27"); replaced=1; print; next
     }
-    # Kết thúc block nếu gặp dòng không phải item (không bắt đầu bằng "-")
     in_peers==1 && !/^[[:space:]]*-/ { in_peers=0; print; next }
-    # In các dòng còn lại
     { print }
-  ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
-
-  mv -f "$CONFIG_FILE.tmp" "$CONFIG_FILE"
-  RANDOM_BOOTNODE="$pick"
-  export RANDOM_BOOTNODE
-  log "Đã cập nhật bootnode: $RANDOM_BOOTNODE"
-}
-
-# --------- Copy credential & restart rl-swarm ----------
-copy_and_restart() {
-  local idx="$1"
-  local PEM_SOURCE="$BASE_DIR/$idx/swarm.pem"
-  local TEMP_SOURCE="$BASE_DIR/$idx/temp-data"
-
-  if [ ! -f "$PEM_SOURCE" ]; then
-    log "LỖI: Không thấy $PEM_SOURCE"
-    return 1
-  fi
-  if [ ! -d "$TEMP_SOURCE" ]; then
-    log "LỖI: Không thấy $TEMP_SOURCE"
-    return 1
-  fi
-
-  systemctl stop rl-swarm || true
-
-  # Đợi rl-swarm thực sự dừng (tối đa 30s)
-  local count=0
-  while systemctl is-active --quiet rl-swarm && [ $count -lt 30 ]; do
-    sleep 1
-    count=$((count+1))
-  done
-
-  # Hạ các tiến trình Node còn treo
-  pkill -f "yarn start" 2>/dev/null || true
-  pkill -f "node.*modal-login" 2>/dev/null || true
-  sleep 2
-
-  # Copy pem & temp-data
-  rm -f "$TARGET_DIR/swarm.pem"
-  cp -f "$PEM_SOURCE" "$TARGET_DIR/"
-  rm -rf "$TARGET_DIR/$LOGIN_SUBDIR/temp-data"
-  mkdir -p "$TARGET_DIR/$LOGIN_SUBDIR"
-  cp -r "$TEMP_SOURCE" "$TARGET_DIR/$LOGIN_SUBDIR/"
-
-  # Cập nhật bootnode ngẫu nhiên
-  update_bootnode
-
-  systemctl start rl-swarm
-
-  # Đợi userData.json xuất hiện (timeout 60s)
-  local timeout=60
-  local elapsed=0
-  while [ ! -f "$TARGET_DIR/$LOGIN_SUBDIR/temp-data/userData.json" ] && [ $elapsed -lt $timeout ]; do
-    sleep 5
-    elapsed=$((elapsed+5))
-  done
-  if [ ! -f "$TARGET_DIR/$LOGIN_SUBDIR/temp-data/userData.json" ]; then
-    log "CẢNH BÁO: userData.json không xuất hiện sau $timeout giây"
-    return 1
-  fi
-
-  # Lấy ORG_ID an toàn bằng jq
-  local ORG_ID
-  ORG_ID="$(jq -r '.orgId // empty' "$TARGET_DIR/$LOGIN_SUBDIR/temp-data/userData.json" 2>/dev/null || true)"
-  if [ -z "${ORG_ID:-}" ]; then
-    log "LỖI: Không tìm thấy orgId trong userData.json"
-    return 1
-  fi
-
-  # Chờ API key kích hoạt (timeout 5 phút)
-  local api_timeout=300
-  local api_elapsed=0
-  while [ $api_elapsed -lt $api_timeout ]; do
-    local STATUS
-    STATUS="$(curl -s "http://localhost:3000/api/get-api-key-status?orgId=$ORG_ID" || echo "error")"
-    if [ "$STATUS" = "activated" ]; then
-      log "API key đã kích hoạt cho orgId=$ORG_ID"
-      break
-    fi
-    sleep 5
-    api_elapsed=$((api_elapsed+5))
-  done
-  if [ $api_elapsed -ge $api_timeout ]; then
-    log "CẢNH BÁO: API key chưa kích hoạt sau $api_timeout giây (orgId=$ORG_ID)"
-  fi
-}
-
-# --------- Khởi động lần đầu với folder 1 ----------
-log "Khởi động với folder 1"
-copy_and_restart 1 || true
-
-# --------- Vòng lặp theo dõi & xoay thư mục ----------
-CURRENT_INDEX=2
-TIMEOUT_SECONDS=600
-last_detect_time="$(date +%s)"
-
-while true; do
-  # Đọc log trong 30 giây gần nhất
-  LOG_LAST_30S="$(journalctl -u rl-swarm --since "30 seconds ago" -o cat 2>/dev/null || true)"
-  now="$(date +%s)"
-
-  if echo "$LOG_LAST_30S" | grep -q "Joining round"; then
-    last_detect_time="$now"
-    # reset index nếu vượt MAX_FOLDER
-    if [ "$CURRENT_INDEX" -gt "$MAX_FOLDER" ]; then
-      CURRENT_INDEX=1
-    fi
-    log "Phát hiện Joining round → chuyển folder $CURRENT_INDEX - ${RANDOM_BOOTNODE:-unknown}"
-    copy_and_restart "$CURRENT_INDEX" || true
-    CURRENT_INDEX=$((CURRENT_INDEX+1))
-  else
-    # Nếu quá timeout không thấy Joining round → rotate
-    if [ $((now - last_detect_time)) -ge $TIMEOUT_SECONDS ]; then
-      if [ "$CURRENT_INDEX" -gt "$MAX_FOLDER" ]; then
-        CURRENT_INDEX=1
-      fi
-      log "TIMEOUT → chuyển folder $CURRENT_INDEX - ${RANDOM_BOOTNODE:-unknown}"
-      copy_and_restart "$CURRENT_INDEX" || true
-      CURRENT_INDEX=$((CURRENT_INDEX+1))
-      last_detect_time="$now"
-    fi
-  fi
-
-  sleep 20
-done
-AUTORUN_EOF
-
-# Thêm quyền thực thi
-chmod +x /root/gensyn/run/auto.run
-
-# ===================== Systemd reload =====================
-systemctl daemon-reload
-
-# ===================== Cron restart rl-swarm2 (3h/lần) =====================
-CRON_CMD="0 2,5,8,11,14,17,20,23 * * * systemctl restart rl-swarm2"
-CRON_COMMENT="# Auto restart rl-swarm2 every 3 hours"
-CURRENT_CRON="$(crontab -l 2>/dev/null || true)"
-if echo "$CURRENT_CRON" | grep -qF "systemctl restart rl-swarm2"; then
-  UPDATED_CRON="$(echo "$CURRENT_CRON" | grep -vF "systemctl restart rl-swarm2" | grep -vF "Auto restart rl-swarm2")"
-  if [ -z "$UPDATED_CRON" ]; then
-    (echo "$CRON_COMMENT"; echo "$CRON_CMD") | crontab -
-  else
-    (echo "$UPDATED_CRON"; echo ""; echo "$CRON_COMMENT"; echo "$CRON_CMD") | crontab -
-  fi
-else
-  if [ -z "$CURRENT_CRON" ]; then
-    (echo "$CRON_COMMENT"; echo "$CRON_CMD") | crontab -
-  else
-    (echo "$CURRENT_CRON"; echo ""; echo "$CRON_COMMENT"; echo "$CRON_CMD") | crontab -
-  fi
-fi
-
-# ===================== Cài packages cơ bản =====================
-echo "BAT DAU CAI DAT CAC PACKAGE CAN THIET"
-PACKAGES="screen curl iptables build-essential git wget lz4 jq make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip python3 python3-pip python3-venv ca-certificates"
-MISSING=""
-for pkg in $PACKAGES; do
-  dpkg -l | grep -q "^ii  $pkg " || MISSING="$MISSING $pkg"
-done
-if [ -n "$MISSING" ]; then
-  apt-get update
-  apt-get install -y $MISSING
-fi
-
-# ===================== Node.js & Yarn (Corepack) =====================
-if command -v node >/dev/null 2>&1; then
-  NODE_MAJOR="$(node -v | cut -d'.' -f1 | sed 's/v//')"
-  if [ "$NODE_MAJOR" -lt 22 ]; then
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    apt-get install -y nodejs
-  fi
-else
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-  apt-get install -y nodejs
-fi
-# Dùng Corepack thay vì install.sh của Yarn để tránh xung đột
-corepack enable
-corepack prepare yarn@4 --activate
-yarn -v || { echo "Yarn chưa sẵn sàng"; exit 1; }
-
-# ===================== Clone rl-swarm (nếu thiếu) =====================
-RL_SWARM_DIR="/root/rl-swarm"
-if [ ! -d "$RL_SWARM_DIR" ]; then
-  cd /root
-  git clone https://github.com/hiepntnaa/rl-swarm/
-fi
-
-# ===================== Python venv & deps =====================
-cd "$RL_SWARM_DIR"
-if [ ! -d ".venv" ]; then
-  python3 -m venv .venv
-fi
-# Cài deps (nếu có requirements)
-set +e
-source .venv/bin/activate 2>/dev/null
-pip install -U pip >/dev/null 2>&1
-[ -f requirements.txt ] && pip install -r requirements.txt || true
-deactivate 2>/dev/null || true
-set -e
-
-# ===================== Bootnodes & sync code =====================
-wget -q -O /root/gensyn/run/bootnodes.txt https://raw.githubusercontent.com/hiepntnaa/general/refs/heads/main/bootnodes.txt || true
-cd "$RL_SWARM_DIR" && git fetch origin && git reset --hard origin/main
-
-# ===================== Hướng dẫn cuối =====================
-echo
-echo -e "\e[92mĐể chạy tay lần đầu: cd /root/rl-swarm && . .venv/bin/activate && ./run_first.sh\e[0m"
-echo
-echo -e "\e[92mSau khi node bắt đầu training → bật dịch vụ:\e[0m"
-echo -e "\e[92msystemctl enable rl-swarm rl-swarm2 && systemctl restart rl-swarm2\e[0m"
-echo
+  ' "$CONFIG_FILE" > "_
