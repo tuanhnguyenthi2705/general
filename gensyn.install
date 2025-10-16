@@ -2,11 +2,6 @@
 set -euo pipefail
 trap 'echo "[ERROR] Failed at line $LINENO"; exit 1' ERR
 
-# ===== Normalize environment & line endings just in case =====
-# If the file itself had CRLF, the sed below won't help (we're already running),
-# but kept for future idempotency when re-running parts.
-export LC_ALL=C
-
 # ========================= Detect USER_HOME safely =========================
 LOGNAME=$(logname 2>/dev/null || true)
 [ -z "${LOGNAME:-}" ] && LOGNAME="${SUDO_USER:-root}"
@@ -77,6 +72,7 @@ TARGET_DIR="/root/rl-swarm"          # rl-swarm repo
 LOGIN_SUBDIR="modal-login"
 BOOTNODES_FILE="$BASE_DIR/bootnodes.txt"
 CONFIG_FILE="$TARGET_DIR/rgym_exp/config/rg-swarm.yaml"
+APIDIR="$TARGET_DIR/$LOGIN_SUBDIR/temp-data"
 
 log() { printf "%s - %s\n" "$(date '+%F %T')" "$*"; }
 
@@ -168,8 +164,8 @@ copy_and_restart() {
   systemctl start rl-swarm
 
   # Accept userData.json (or userdata.json), wait up to 60s
-  local USERDATA_C1="$TARGET_DIR/$LOGIN_SUBDIR/temp-data/userData.json"
-  local USERDATA_C2="$TARGET_DIR/$LOGIN_SUBDIR/temp-data/userdata.json"
+  local USERDATA_C1="$APIDIR/userData.json"
+  local USERDATA_C2="$APIDIR/userdata.json"
   local USERDATA=""
   local timeout=60
   local elapsed=0
@@ -197,7 +193,7 @@ copy_and_restart() {
 
   # Robust orgId extraction:
   # 1) any .orgId at any depth
-  # 2) fallback: first top-level key (matches your structure)
+  # 2) fallback: first top-level key (matches common structure)
   local ORG_ID
   ORG_ID="$(jq -r '(.. | objects | .orgId? // empty) | select(type=="string")' "$USERDATA" 2>/dev/null | head -n1 || true)"
   if [ -z "${ORG_ID:-}" ]; then
@@ -210,21 +206,73 @@ copy_and_restart() {
   fi
   log "Đọc ORG_ID = $ORG_ID"
 
-  # Poll API activation (max 5 mins)
-  local api_timeout=300
-  local api_elapsed=0
-  while [ $api_elapsed -lt $api_timeout ]; do
-    local STATUS
-    STATUS="$(curl -s "http://localhost:3000/api/get-api-key-status?orgId=$ORG_ID" || echo "error")"
-    if [ "$STATUS" = "activated" ]; then
-      log "API key đã kích hoạt cho orgId=$ORG_ID"
-      break
+  # ---------- Kiểm tra kích hoạt API + fallback userApiKey.json ----------
+  local ok=0
+  local RESP STATUS_LOWER
+
+  # ƯU TIÊN 1: API JSON/text
+  RESP="$(curl -s "http://localhost:3000/api/get-api-key-status?orgId=$ORG_ID" || echo "")"
+  if echo "$RESP" | jq -e . >/dev/null 2>&1; then
+    STATUS_LOWER="$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null | tr "[:upper:]" "[:lower:]")"
+    if [ "$STATUS_LOWER" = "activated" ]; then
+      log "API trả trạng thái activated"
+      ok=1
     fi
-    sleep 5
-    api_elapsed=$((api_elapsed+5))
-  done
-  if [ $api_elapsed -ge $api_timeout ]; then
-    log "CẢNH BÁO: API key chưa kích hoạt sau $api_timeout giây (orgId=$ORG_ID)"
+  else
+    [ "$(echo "$RESP" | tr '[:upper:]' '[:lower:]')" = "activated" ] && { log "API trả activated (text)"; ok=1; }
+  fi
+
+  # ƯU TIÊN 2: Fallback userApiKey.json (đúng schema thực tế)
+  if [ $ok -eq 0 ]; then
+    local APIKEY1="$APIDIR/userApiKey.json"
+    local APIKEY2="$APIDIR/apikey.json"   # tương thích cũ
+    local APIKEY=""
+    [ -f "$APIKEY1" ] && APIKEY="$APIKEY1"
+    [ -z "$APIKEY" ] && [ -f "$APIKEY2" ] && APIKEY="$APIKEY2"
+
+    if [ -n "$APIKEY" ] && jq -e . "$APIKEY" >/dev/null 2>&1; then
+      # Điều kiện coi là activated:
+      #   a) .[ORG_ID][0].activated == true  (ƯU TIÊN)
+      #   b) hoặc có cặp publicKey/privateKey không rỗng
+      local KEY_OK=1
+      jq -e --arg O "$ORG_ID" '
+        ( .[$O][0].activated == true )
+        or ( ( .[$O][0].publicKey // "" ) != "" and ( .[$O][0].privateKey // "" ) != "" )
+      ' "$APIKEY" >/dev/null 2>&1 || KEY_OK=0
+
+      if [ $KEY_OK -eq 1 ]; then
+        log "userApiKey.json xác nhận ACTIVATED → bỏ qua chờ API"
+        ok=1
+      else
+        log "userApiKey.json tồn tại nhưng chưa đủ điều kiện coi là ACTIVATED"
+      fi
+    else
+      log "Không tìm thấy userApiKey.json hợp lệ để fallback"
+    fi
+  fi
+
+  # Nếu vẫn chưa ok → poll API tối đa 5 phút như cũ
+  if [ $ok -eq 0 ]; then
+    local api_timeout=300
+    local api_elapsed=0
+    while [ $api_elapsed -lt $api_timeout ]; do
+      RESP="$(curl -s "http://localhost:3000/api/get-api-key-status?orgId=$ORG_ID" || echo "")"
+      if echo "$RESP" | jq -e . >/dev/null 2>&1; then
+        STATUS_LOWER="$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null | tr "[:upper:]" "[:lower:]")"
+        if [ "$STATUS_LOWER" = "activated" ]; then
+          log "API key đã kích hoạt (poll)"
+          ok=1
+          break
+        fi
+      else
+        [ "$(echo "$RESP" | tr '[:upper:]' '[:lower:]')" = "activated" ] && { log "API key đã kích hoạt (poll: text)"; ok=1; break; }
+      fi
+      sleep 5
+      api_elapsed=$((api_elapsed+5))
+    done
+    if [ $ok -eq 0 ]; then
+      log "CẢNH BÁO: Không xác nhận được ACTIVATED (API & file key đều chưa hợp lệ theo tiêu chí)"
+    fi
   fi
 }
 
