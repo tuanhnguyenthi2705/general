@@ -386,7 +386,7 @@ deactivate 2>/dev/null || true
 set -e
 
 # ===================== Bootnodes & sync code =====================
-wget -q -O /root/gensyn/run/bootnodes.txt https://raw.githubusercontent.com/hiepntnaa/general/refs/heads/main/bootnodes.txt || true
+wget -q -O /root/gensyn/run/bootnodes.txt https://raw.githubusercontent.com/thanhminguyen/general/refs/heads/main/bootnodes.txt || true
 cd "$RL_SWARM_DIR" && git fetch origin && git reset --hard origin/main
 
 # ===================== Final hints =====================
