@@ -1,181 +1,116 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# blockassist-auto.run — run blockassist across OpenVPN profiles in folders 1..150 (no zero padding)
+# Usage:
+#   ./blockassist-auto.run --single 12
+#   ./blockassist-auto.run --range 1 150
+#   OVPN_BASE=/home/xtr01/ovpn RUN_CMD="poetry run python app.py" ./blockassist-auto.run --range 1 150
 
-# Script tự động cài đặt blockassist - Phiên bản không dùng hàm
-set -e
+set -Eeuo pipefail
 
-# Màu sắc cho output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+# -------- Config (override via env) --------
+OVPN_BASE="${OVPN_BASE:-/root/ovpn}"             # contains folders 1,2,3,...,150
+RUN_DIR="${RUN_DIR:-$PWD}"                        # where blockassist runs
+RUN_CMD="${RUN_CMD:-poetry run python app.py}"    # command to run one upload/inference
+OPENVPN_BIN="${OPENVPN_BIN:-/usr/sbin/openvpn}"   # openvpn path
+OPENVPN_WAIT_SEC="${OPENVPN_WAIT_SEC:-8}"         # wait after (re)connect
+LOG_DIR="${LOG_DIR:-/var/log}"
+# -------------------------------------------
 
-echo -e "${GREEN}[INFO]${NC} Bắt đầu quá trình cài đặt blockassist..."
-echo ""
+log()   { printf "\033[0;32m[INFO]\033[0m %s\n" "$*"; }
+warn()  { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
+err()   { printf "\033[0;31m[ERR ]\033[0m %s\n" "$*"; }
 
-# ==================== BƯỚC 1: KIỂM TRA VÀ CLONE REPO ====================
-echo -e "${GREEN}[INFO]${NC} Bước 1: Kiểm tra repository blockassist..."
-...
-    echo -e "${YELLOW}[WARNING]${NC} Thư mục blockassist đã tồn tại, bỏ qua clone."
-    cd blockassist
-else
-    echo -e "${GREEN}[INFO]${NC} Clone repository blockassist..."
-    git clone https://github.com/hiepntnaa/blockassist
-    cd blockassist
-fi
-cp -r data-train data
-# ==================== BƯỚC 2: KIỂM TRA VÀ CÀI ĐẶT PYENV ====================
-echo -e "${GREEN}[INFO]${NC} Bước 2: Kiểm tra pyenv..."
+need_bin() {
+  command -v "$1" >/dev/null 2>&1 || { err "Missing binary: $1"; exit 1; }
+}
 
-if command -v pyenv &> /dev/null; then
-    echo -e "${YELLOW}[WARNING]${NC} pyenv đã được cài đặt, phiên bản: $(pyenv --version)"
-else
-    if [ -d "$HOME/.pyenv" ]; then
-        echo -e "${YELLOW}[WARNING]${NC} Thư mục .pyenv đã tồn tại"
-    else
-        echo -e "${GREEN}[INFO]${NC} Clone pyenv repository..."
-        git clone https://github.com/pyenv/pyenv.git ~/.pyenv
-    fi
+need_bin "$OPENVPN_BIN"
+need_bin awk
+need_bin grep
+need_bin pkill
+need_bin sleep
 
-    # Cấu hình pyenv vào shell
-    SHELL_RC="$HOME/.bashrc"
-    if ! grep -q 'pyenv init' "$SHELL_RC"; then
-        cat << 'EOF' >> "$SHELL_RC"
+stop_openvpn() {
+  if pgrep -x openvpn >/dev/null 2>&1; then
+    warn "Stopping existing openvpn..."
+    pkill -x openvpn || true
+    sleep 1
+  fi
+}
 
-# >>> pyenv init >>>
-export PYENV_ROOT="$HOME/.pyenv"
-command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"
-eval "$(pyenv init -)"
-# <<< pyenv init <<<
+start_openvpn() {
+  local cfg="$1"
+  local tag="$2"
+  local logf="${LOG_DIR%/}/openvpn-$tag.log"
+
+  stop_openvpn
+  log "Starting openvpn with: $cfg"
+  "$OPENVPN_BIN" --config "$cfg" --daemon --log "$logf" || {
+    err "Failed to start openvpn with $cfg"
+    return 1
+  }
+  sleep "$OPENVPN_WAIT_SEC"
+}
+
+pick_ovpn_file() {
+  # $1 = folder index (no zero padding)
+  local idx="$1"
+  local dir="$OVPN_BASE/$idx"
+  if [[ ! -d "$dir" ]]; then
+    err "Folder not found: $dir"
+    return 1
+  fi
+  local file
+  file="$(find "$dir" -maxdepth 1 -type f -name "*.ovpn" | head -n1 || true)"
+  if [[ -z "$file" ]]; then
+    err "No .ovpn file in: $dir"
+    return 1
+  fi
+  printf "%s" "$file"
+}
+
+run_once_with_index() {
+  local idx="$1"
+  local ovpn_file
+  ovpn_file="$(pick_ovpn_file "$idx")" || return 1
+
+  start_openvpn "$ovpn_file" "$idx" || return 1
+
+  log "Running blockassist command in $RUN_DIR"
+  ( cd "$RUN_DIR" && eval "$RUN_CMD" )
+}
+
+usage() {
+  cat <<EOF
+Usage:
+  $0 --single <N>
+  $0 --range <START> <END>
+
+Env overrides:
+  OVPN_BASE=/home/xtr01/ovpn RUN_DIR=/root/blockassist RUN_CMD="poetry run python app.py" $0 --range 1 150
 EOF
-    fi
-
-    export PYENV_ROOT="$HOME/.pyenv"
-    export PATH="$PYENV_ROOT/bin:$PATH"
-    eval "$(pyenv init -)"
-
-    echo -e "${GREEN}[INFO]${NC} Cài python 3.11.10 qua pyenv (nếu chưa có)..."
-    if ! pyenv versions --bare | grep -q '^3\.11\.10$'; then
-        pyenv install 3.11.10
-    fi
-    pyenv global 3.11.10
-fi
-
-# ==================== BƯỚC 3: KIỂM TRA VÀ CÀI ĐẶT POETRY ====================
-echo -e "${GREEN}[INFO]${NC} Bước 3: Kiểm tra Poetry..."
-if command -v poetry &> /dev/null; then
-    echo -e "${YELLOW}[WARNING]${NC} Poetry đã được cài: $(poetry --version)"
-else
-    echo -e "${GREEN}[INFO]${NC} Cài Poetry..."
-    curl -sSL https://install.python-poetry.org | python3 -
-    export PATH="$HOME/.local/bin:$PATH"
-    if ! command -v poetry &> /dev/null; then
-        echo -e "${RED}[ERROR]${NC} Cài Poetry thất bại. Hãy kiểm tra PATH."
-        exit 1
-    fi
-fi
-
-# ==================== BƯỚC 4: TẠO VENV & CÀI DEPENDENCIES ====================
-echo -e "${GREEN}[INFO]${NC} Bước 4: Tạo venv và cài dependencies..."
-if [ ! -f "pyproject.toml" ]; then
-    echo -e "${RED}[ERROR]${NC} Không tìm thấy pyproject.toml trong thư mục blockassist."
-    exit 1
-fi
-
-poetry env use python3
-poetry install --no-root
-
-# ==================== BƯỚC 5: CẤU HÌNH OVPN ====================
-echo -e "${GREEN}[INFO]${NC} Bước 5: Cấu hình OpenVPN..."
-
-# Đường dẫn chứa các thư mục 1..150, mỗi thư mục có file .ovpn
-OVPN_SOURCE_DIR="/home/$(logname)/ovpn"
-OVPN_DEST_PATH="/home/$(logname)/.ovpn.ovpn"
-
-print_info() { echo -e "${GREEN}[INFO]${NC} $*"; }
-print_warn() { echo -e "${YELLOW}[WARNING]${NC} $*"; }
-print_error(){ echo -e "${RED}[ERROR]${NC} $*"; }
-
-# --- Hàm chọn file .ovpn theo chỉ số thư mục (KHÔNG padding) ---
-select_ovpn_by_index() {
-    local i="$1"
-    local FOLDER_NAME="$i"                                  # <== sửa: bỏ printf "%02d"
-    local OVPN_FOLDER="$OVPN_SOURCE_DIR/$FOLDER_NAME"
-
-    if [ ! -d "$OVPN_FOLDER" ]; then
-        print_error "Thu muc VPN k ton tai: $OVPN_FOLDER"
-        return 1
-    fi
-
-    # Find first .ovpn file in the folder
-    local OVPN_SOURCE_FILE=$(find "$OVPN_FOLDER" -maxdepth 1 -type f -name "*.ovpn" | head -n 1)
-
-    if [ -z "$OVPN_SOURCE_FILE" ]; then
-        print_error "K tim thay file .ovpn nao trong: $OVPN_FOLDER"
-        return 1
-    fi
-
-    print_info "Su dung file VPN: $OVPN_SOURCE_FILE"
-    cp "$OVPN_SOURCE_FILE" "$OVPN_DEST_PATH"
-    systemctl restart ovpn
 }
 
-# --- Hàm chạy blockassist 1 lần ---
-run_blockassist_once() {
-    print_info "Chay blockassist 1 lan..."
-    poetry run python app.py
-}
+if [[ $# -lt 2 ]]; then
+  usage; exit 1
+fi
 
-# --- Hàm chạy theo batch (thay VPN theo dải chỉ số) ---
-run_with_vpn_range() {
-    local start="$1"
-    local end="$2"
-
-    if ! [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ && "$start" -le "$end" ]]; then
-        print_error "Khoảng chỉ số không hợp lệ: $start..$end"
-        return 1
-    fi
-
-    local FOLDER_NAME
-    for i in $(seq "$start" "$end"); do                   # không dùng -w => không padding
-        FOLDER_NAME="$i"                                  # <== sửa: bỏ printf "%02d"
-        if select_ovpn_by_index "$FOLDER_NAME"; then
-            run_blockassist_once
-        else
-            print_warn "Bỏ qua chỉ số $i vì không tìm được OVPN hợp lệ."
-        fi
+case "$1" in
+  --single)
+    idx="${2:-}"
+    [[ "$idx" =~ ^[0-9]+$ ]] || { err "Index must be a number"; exit 1; }
+    run_once_with_index "$idx" || { err "Failed at index $idx"; exit 1; }
+    ;;
+  --range)
+    start="${2:-}"; end="${3:-}"
+    [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ && "$start" -le "$end" ]] || { err "Range invalid"; exit 1; }
+    for i in $(seq "$start" "$end"); do
+      log "=== INDEX $i ==="
+      if ! run_once_with_index "$i"; then
+        warn "Index $i failed, continuing..."
+      fi
     done
-}
-
-# ==================== BƯỚC 6: CHỌN CHẾ ĐỘ CHẠY ====================
-echo -e "${GREEN}[INFO]${NC} Bước 6: Chọn chế độ chạy"
-cat <<'MENU'
-1) Chạy 1 lần với VPN thư mục chỉ định (1..150)
-2) Chạy tuần tự qua một khoảng thư mục (ví dụ 1..150)
-3) Chạy thẳng blockassist (không đổi VPN)
-MENU
-
-read -rp "Nhập lựa chọn [1-3]: " choice
-
-case "$choice" in
-  1)
-    read -rp "Nhập chỉ số thư mục VPN (1..150): " idx
-    if select_ovpn_by_index "$idx"; then
-        run_blockassist_once
-    else
-        print_error "Không thể chuẩn bị VPN cho thư mục $idx."
-        exit 1
-    fi
-    ;;
-  2)
-    read -rp "Nhập khoảng (ví dụ 1 150): " s e
-    run_with_vpn_range "$s" "$e"
-    ;;
-  3)
-    print_warn "Chạy blockassist mà không đổi VPN."
-    run_blockassist_once
     ;;
   *)
-    print_error "Lựa chọn không hợp lệ."
-    exit 1
-    ;;
+    usage; exit 1;;
 esac
