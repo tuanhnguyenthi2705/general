@@ -1,124 +1,14 @@
-#!/bin/bash
-# Script tự động cài đặt blockassist - phiên bản tối giản, không OVPN/proxy
-set -e
-
-# ===== MÀU SẮC CHO OUTPUT =====
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-echo -e "${GREEN}[INFO]${NC} Bắt đầu quá trình cài đặt blockassist..."
-echo ""
-
-# ==================== BƯỚC 1: KIỂM TRA VÀ CLONE REPO ====================
-echo -e "${GREEN}[INFO]${NC} Bước 1: Kiểm tra repository blockassist..."
-
-if [ -d "blockassist" ]; then
-    echo -e "${YELLOW}[WARNING]${NC} Thư mục blockassist đã tồn tại, bỏ qua clone."
-    cd blockassist
-else
-    echo -e "${GREEN}[INFO]${NC} Clone repository blockassist..."
-    git clone https://github.com/hiepntnaa/blockassist
-    cd blockassist
-fi
-cp -r data-train data
-
-# ==================== BƯỚC 2: KIỂM TRA VÀ CÀI ĐẶT PYENV ====================
-echo -e "${GREEN}[INFO]${NC} Bước 2: Kiểm tra pyenv..."
-
-if command -v pyenv &> /dev/null; then
-    echo -e "${YELLOW}[WARNING]${NC} pyenv đã được cài đặt, phiên bản: $(pyenv --version)"
-else
-    if [ -d "$HOME/.pyenv" ]; then
-        echo -e "${YELLOW}[WARNING]${NC} Thư mục .pyenv đã tồn tại"
-    else
-        echo -e "${GREEN}[INFO]${NC} Clone pyenv repository..."
-        git clone https://github.com/pyenv/pyenv.git ~/.pyenv
-    fi
-    
-    echo -e "${GREEN}[INFO]${NC} Cấu hình pyenv trong bashrc..."
-    if ! grep -q "# pyenv configuration" ~/.bashrc; then
-        {
-            echo ''
-            echo '# pyenv configuration'
-            echo 'export PYENV_ROOT="$HOME/.pyenv"'
-            echo '[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"'
-            echo 'eval "$(pyenv init --path)"'
-            echo 'eval "$(pyenv init -)"'
-        } >> ~/.bashrc
-        echo -e "${GREEN}[INFO]${NC} Đã thêm cấu hình pyenv vào ~/.bashrc"
-    else
-        echo -e "${YELLOW}[WARNING]${NC} Cấu hình pyenv đã tồn tại trong ~/.bashrc"
-    fi
-    
-    export PYENV_ROOT="$HOME/.pyenv"
-    export PATH="$PYENV_ROOT/bin:$PATH"
-    eval "$(pyenv init --path)"
-    eval "$(pyenv init -)"
-    echo -e "${GREEN}[INFO]${NC} pyenv đã được cài đặt thành công!"
-fi
-
-# ==================== BƯỚC 3: KIỂM TRA VÀ CÀI ĐẶT PYTHON 3.10 ====================
-echo -e "${GREEN}[INFO]${NC} Bước 3: Kiểm tra Python 3.10..."
-
-export PYENV_ROOT="$HOME/.pyenv"
-export PATH="$PYENV_ROOT/bin:$PATH"
-eval "$(pyenv init --path)" 2>/dev/null || true
-eval "$(pyenv init -)" 2>/dev/null || true
-
-if pyenv versions | grep -q "3.10"; then
-    echo -e "${YELLOW}[WARNING]${NC} Python 3.10 đã được cài đặt qua pyenv"
-    pyenv global 3.10
-else
-    echo -e "${GREEN}[INFO]${NC} Cài đặt Python 3.10..."
-    pyenv install 3.10
-    pyenv global 3.10
-    echo -e "${GREEN}[INFO]${NC} Python 3.10 đã được cài đặt thành công!"
-fi
-
-echo -e "${GREEN}[INFO]${NC} Phiên bản Python hiện tại: $(python --version)"
-
-# ==================== BƯỚC 4: CHẠY SETUP.SH NẾU CÓ ====================
-echo -e "${GREEN}[INFO]${NC} Bước 4: Kiểm tra setup.sh..."
-
-if [ -f "setup.sh" ]; then
-    if [ -x "setup.sh" ]; then
-        echo -e "${GREEN}[INFO]${NC} Chạy setup.sh..."
-        ./setup.sh
-    else
-        chmod +x setup.sh
-        ./setup.sh
-    fi
-else
-    echo -e "${YELLOW}[WARNING]${NC} Không tìm thấy setup.sh, bỏ qua bước này."
-fi
-
-# ==================== BƯỚC 5: KIỂM TRA VÀ CÀI ĐẶT THƯ VIỆN PYTHON ====================
-echo -e "${GREEN}[INFO]${NC} Bước 5: Kiểm tra và cài đặt thư viện Python..."
-
-for pkg in psutil readchar; do
-    if python -c "import $pkg" 2>/dev/null; then
-        echo -e "${YELLOW}[WARNING]${NC} Thư viện $pkg đã được cài đặt"
-    else
-        echo -e "${GREEN}[INFO]${NC} Cài đặt $pkg..."
-        pip install $pkg
-    fi
-done
-
-# ==================== BƯỚC 6: TẠO FILE AUTO.RUN ====================
-echo -e "${GREEN}[INFO]${NC} Bước 6: Tạo file auto.run..."
-
-cat > /root/blockassist/auto.run << 'AUTORUN_EOF'
 #!/usr/bin/env bash
 set -uo pipefail
 set +m
 
+# ===== MÀU LOG =====
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 print_info(){ echo -e "${GREEN}[INFO]${NC} $*"; }
 print_warn(){ echo -e "${YELLOW}[WARNING]${NC} $*"; }
 print_err(){  echo -e "${RED}[ERROR]${NC} $*"; }
 
+# ===== ĐƯỜNG DẪN =====
 BLOCKASSIST_DIR="/root/blockassist"
 DEST_DIR="$BLOCKASSIST_DIR/modal-login"
 TOKEN_FILE="/home/$(logname)/gensyn/huggingface.token"
@@ -127,87 +17,174 @@ LOG_FILE="$BLOCKASSIST_DIR/LOG.log"
 mkdir -p "$DEST_DIR"
 touch "$LOG_FILE"
 
+# ===== TRAP =====
 cleanup(){ print_warn "Nhận tín hiệu dừng. Kết thúc vòng chạy."; exit 0; }
 trap cleanup INT TERM
 trap '' HUP SIGCHLD
 
-command -v expect >/dev/null 2>&1 || (apt update -y && apt install -y expect)
+# ===== CÔNG CỤ TỐI THIỂU =====
+command -v python >/dev/null 2>&1 || { print_err "Thiếu python"; exit 1; }
+command -v pip    >/dev/null 2>&1 || { print_err "Thiếu pip"; exit 1; }
+if ! command -v expect >/dev/null 2>&1; then
+  print_info "Cài đặt expect..."
+  apt-get update -y && apt-get install -y expect
+fi
 
-# Đọc token hợp lệ
-TOKENS=$(grep -vE '^\s*#|^\s*$' "$TOKEN_FILE" || true)
+# (tùy chọn) đảm bảo psutil/readchar có sẵn
+python - <<'PY' || true
+try:
+    import psutil
+except Exception:
+    import os; os.system("pip install -q psutil")
+try:
+    import readchar
+except Exception:
+    import os; os.system("pip install -q readchar")
+PY
+
+# ===== NẠP TOKEN =====
+[ -f "$TOKEN_FILE" ] || { print_err "Không tìm thấy token: $TOKEN_FILE"; exit 1; }
+TOKENS="$(grep -vE '^\s*#|^\s*$' "$TOKEN_FILE" || true)"
 NUM_TOKENS=$(printf "%s\n" "$TOKENS" | wc -l)
-[ "$NUM_TOKENS" -ge 1 ] || { print_err "File token trống hoặc lỗi."; exit 1; }
+[ "$NUM_TOKENS" -ge 1 ] || { print_err "File token không có dòng hợp lệ."; exit 1; }
 
-read -p "Nhập số bắt đầu (1..150): " START
-read -p "Nhập số kết thúc (1..150): " END
-[[ "$START" =~ ^[0-9]+$ && "$END" =~ ^[0-9]+$ ]] || { print_err "Giá trị không hợp lệ."; exit 1; }
+# ===== LẤY KHOẢNG CHẠY =====
+START_ARG="${1:-}"; END_ARG="${2:-}"
+START=""; END=""
 
-if [ "$END" -lt "$START" ]; then tmp=$START; START=$END; END=$tmp; fi
-print_info "Chạy vòng lặp từ $START đến $END (xoay vòng)."
-
-get_token(){ sed -n "${1}p" <<<"$TOKENS"; }
-
-copy_data(){
-  local i=$1
-  SRC="/home/$(logname)/gensyn/$i/temp-data"
-  DST="$DEST_DIR/temp-data"
-  [ -d "$SRC" ] || { print_warn "Không có thư mục $SRC"; return 1; }
-  rm -rf "$DST"; mkdir -p "$DST"
-  cp -a "$SRC"/. "$DST"/
+validate_range(){
+  local s="$1" e="$2"
+  [[ "$s" =~ ^[0-9]+$ ]] && [[ "$e" =~ ^[0-9]+$ ]] || return 1
+  [ "$s" -ge 1 ] && [ "$e" -ge 1 ] && [ "$s" -le 150 ] && [ "$e" -le 150 ] || return 1
+  return 0
 }
 
-run_train(){
-  local i=$1; local token="$2"
-  cd "$BLOCKASSIST_DIR"
-  local ex=$(mktemp)
-  cat >"$ex"<<'EOF'
+if [ -n "$START_ARG" ] && [ -n "$END_ARG" ]; then
+  if validate_range "$START_ARG" "$END_ARG"; then
+    START="$START_ARG"; END="$END_ARG"
+  else
+    print_err "Tham số không hợp lệ. Dùng: $0 <START 1..150> <END 1..150>"; exit 1
+  fi
+else
+  if [ -t 0 ]; then
+    exec 3</dev/tty || true
+    read -rp "Nhập số bắt đầu (1..150): " START <&3 || START=1
+    read -rp "Nhập số kết thúc (1..150): " END <&3 || END=150
+    if ! validate_range "${START:-}" "${END:-}"; then
+      print_err "Khoảng nhập không hợp lệ. Vui lòng chạy lại và nhập 1..150."; exit 1
+    fi
+  else
+    print_err "Không ở chế độ tương tác. Hãy chạy với tham số: $0 <START> <END> (vd: $0 11 20)"; exit 1
+  fi
+fi
+
+if [ "$END" -lt "$START" ]; then
+  print_warn "END < START, hoán đổi."
+  tmp="$START"; START="$END"; END="$tmp"
+fi
+
+# ===== HEADER LOG PHIÊN CHẠY =====
+{
+  echo "===================================================================="
+  echo "Auto training session started at $(date '+%F %T')"
+  echo "Range: START=$START END=$END | Total valid tokens=$NUM_TOKENS"
+  echo "Repo Dir: $BLOCKASSIST_DIR | Data Dest: $DEST_DIR"
+  echo "Token File: $TOKEN_FILE"
+  echo "===================================================================="
+} | tee -a "$LOG_FILE"
+
+print_info "Khoảng chạy: $START .. $END (xoay vòng vô hạn)."
+
+# ===== HÀM =====
+get_token_by_index(){
+  local idx="$1"
+  if [ "$idx" -ge 1 ] && [ "$idx" -le "$NUM_TOKENS" ]; then
+    printf "%s\n" "$TOKENS" | sed -n "${idx}p"
+  else
+    echo ""
+  fi
+}
+
+copy_training_data(){
+  local i="$1"
+  local SRC="/home/$(logname)/gensyn/${i}/temp-data"
+  local DST="$DEST_DIR/temp-data"
+  if [ ! -d "$SRC" ]; then
+    echo "[COPY][$(date '+%F %T')] Source not found: $SRC" | tee -a "$LOG_FILE"
+    return 1
+  fi
+  echo "[COPY][$(date '+%F %T')] Sync from $SRC -> $DST" | tee -a "$LOG_FILE"
+  rm -rf "$DST"; mkdir -p "$DST"
+  cp -a "$SRC"/. "$DST"/
+  echo "[COPY][$(date '+%F %T')] Done copy i=$i" | tee -a "$LOG_FILE"
+}
+
+run_training(){
+  local i="$1"; local token="$2"
+  [ -n "$token" ] || { echo "[TRAIN][$(date '+%F %T')] Missing token for i=$i" | tee -a "$LOG_FILE"; return 1; }
+  cd "$BLOCKASSIST_DIR" || { echo "[TRAIN] Cannot cd $BLOCKASSIST_DIR" | tee -a "$LOG_FILE"; return 1; }
+
+  # expect tạm thời
+  local EX; EX="$(mktemp)"
+  cat > "$EX" <<'EXP_EOF'
 #!/usr/bin/expect -f
 set timeout -1
 spawn python run.py
 expect {
-  -re "(?i)token" { send "$env(HF_TOKEN)\r"; exp_continue }
-  -re "(?i)huggingface" { send "$env(HF_TOKEN)\r"; exp_continue }
-  eof
+    -re "(?i)token"       { send "$env(HF_TOKEN)\r"; exp_continue }
+    -re "(?i)huggingface" { send "$env(HF_TOKEN)\r"; exp_continue }
+    eof
 }
-EOF
-  chmod +x "$ex"
-  HF_TOKEN="$token" setsid bash -lc "
-    trap '' INT TERM
-    echo '=== $(date) bắt đầu $i ===' >>'$LOG_FILE'
-    PUBLIC_IP=\$(curl -s --max-time 6 -4 ifconfig.me || echo unknown)
-    echo 'IP: '\$PUBLIC_IP >>'$LOG_FILE'
-    '$ex' >>'$LOG_FILE' 2>&1
-    echo '=== $(date) kết thúc $i ===' >>'$LOG_FILE'
-  " &
-  wait $! 2>/dev/null || true
-  rm -f "$ex"
+EXP_EOF
+  chmod +x "$EX"
+
+  # chạy cách ly + log chi tiết kiểu bản gốc
+  HF_TOKEN="$token" setsid bash -lc '
+    trap "" TERM INT
+    {
+      TS="$(date "+%F %T")"
+      PUBLIC_IP=$(curl -s --max-time 6 -4 ifconfig.me || echo "unknown")
+      echo "--------------------------------------------------------------------"
+      echo "[$TS] BEGIN TRAIN i='"$i"'"
+      echo "Source: '"$i"' | IP: $PUBLIC_IP"
+      '"$EX"'
+      echo "[DONE] Training completed at $(date "+%F %T") for i='"$i"'"
+      echo "--------------------------------------------------------------------"
+    } 2>&1
+  ' | tee -a "$LOG_FILE" || true
+
+  rm -f "$EX"
 }
 
 process_range(){
-  for i in $(seq "$1" "$2"); do
-    print_info "→ Xử lý thư mục $i"
-    copy_data "$i" || continue
-    token=$(get_token "$i")
-    [ -z "$token" ] && { print_warn "Không có token cho $i"; continue; }
-    run_train "$i" "$token"
-    sleep $((RANDOM%21+20))
+  local start="$1" end="$2"
+  for i in $(seq "$start" "$end"); do
+    {
+      echo "===================================================================="
+      echo "[RANGE][$(date '+%F %T')] Processing i=$i"
+    } | tee -a "$LOG_FILE"
+
+    copy_training_data "$i" || { echo "[RANGE] Skip i=$i due to copy failure" | tee -a "$LOG_FILE"; continue; }
+
+    local token; token="$(get_token_by_index "$i")"
+    if [ -z "$token" ]; then
+      echo "[RANGE] No token for i=$i (valid tokens=$NUM_TOKENS). Skip." | tee -a "$LOG_FILE"
+      continue
+    fi
+
+    run_training "$i" "$token" || echo "[RANGE] Training error i=$i (continue next)" | tee -a "$LOG_FILE"
+
+    SLEEP_TIME=$((RANDOM % 21 + 20))
+    echo "[SLEEP] $SLEEP_TIME seconds" | tee -a "$LOG_FILE"
+    sleep "$SLEEP_TIME"
   done
 }
 
+# ===== XOAY VÒNG LIÊN TỤC =====
+print_info "Bắt đầu vòng xoay trong khoảng $START..$END. Dừng bằng Ctrl+C."
 while true; do
   process_range "$START" "$END"
-  echo "[DEBUG] xong vòng $(date)" | tee -a "$LOG_FILE"
+  ec=$?
+  echo "[DEBUG] process_range exit=$ec at $(date '+%F %T')" | tee -a "$LOG_FILE"
   sleep 2
 done
-AUTORUN_EOF
-
-chmod +x /root/blockassist/auto.run
-echo -e "${GREEN}[INFO]${NC} File auto.run đã được tạo tại /root/blockassist/auto.run"
-
-# ==================== KẾT THÚC ====================
-echo ""
-echo "=========================================="
-echo -e "${GREEN}[INFO]${NC} CÀI ĐẶT HOÀN TẤT!"
-echo "=========================================="
-echo -e "${GREEN}[INFO]${NC} Python: $(python --version)"
-echo -e "${YELLOW}[NOTE]${NC} Nếu là lần đầu, hãy chạy: source ~/.bashrc"
