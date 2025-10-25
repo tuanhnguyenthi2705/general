@@ -12,8 +12,8 @@ else
 fi
 
 # ========================= Data dir =========================
-mkdir -p "/root/gensyn/run"  # thống nhất dùng /root để tránh lệch quyền/đường dẫn
-BASE_RUN="/root/gensyn/run"
+mkdir -p "/home/xtr01/gensyn/run"  # thống nhất dùng /root để tránh lệch quyền/đường dẫn
+BASE_RUN="/home/xtr01/gensyn/run"
 
 # ===================== SERVICE: rl-swarm =====================
 cat << 'EOF' > /etc/systemd/system/rl-swarm.service
@@ -49,7 +49,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/root
-ExecStart=/root/gensyn/run/auto.run
+ExecStart=/home/xtr01/gensyn/run/auto.run
 Restart=always
 RestartSec=10
 Environment=LOGNAME=root
@@ -62,12 +62,12 @@ EOF
 
 # ===================== SCRIPT: auto.run =====================
 # Lưu ý: marker kết thúc here-doc PHẢI là 'AUTORUN_EOF' đứng một mình, không thụt lề, có newline sau đó.
-cat > /root/gensyn/run/auto.run <<'AUTORUN_EOF'
+cat > /home/xtr01/gensyn/run/auto.run <<'AUTORUN_EOF'
 #!/bin/bash
 set -euo pipefail
 
 # --------- Config paths ----------
-BASE_DIR="/root/gensyn/run"          # source: /root/gensyn/run/<idx>/
+BASE_DIR="/home/xtr01/gensyn/run"          # source: /home/xtr01/gensyn/run/<idx>/
 TARGET_DIR="/root/rl-swarm"          # rl-swarm repo
 LOGIN_SUBDIR="modal-login"
 BOOTNODES_FILE="$BASE_DIR/bootnodes.txt"
@@ -314,7 +314,7 @@ done
 AUTORUN_EOF
 
 # Ensure executable
-chmod +x /root/gensyn/run/auto.run
+chmod +x /home/xtr01/gensyn/run/auto.run
 
 # ===================== systemd reload =====================
 systemctl daemon-reload
@@ -386,7 +386,7 @@ deactivate 2>/dev/null || true
 set -e
 
 # ===================== Bootnodes & sync code =====================
-wget -q -O /root/gensyn/run/bootnodes.txt https://raw.githubusercontent.com/thanhminguyen/general/refs/heads/main/bootnodes.txt || true
+wget -q -O /home/xtr01/gensyn/run/bootnodes.txt https://raw.githubusercontent.com/thanhminguyen/general/refs/heads/main/bootnodes.txt || true
 cd "$RL_SWARM_DIR" && git fetch origin && git reset --hard origin/main
 
 # ===================== Final hints =====================
