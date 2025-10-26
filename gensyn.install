@@ -289,12 +289,12 @@ while true; do
   LOG_LAST_30S="$(journalctl -u rl-swarm --since "30 seconds ago" -o cat 2>/dev/null || true)"
   now="$(date +%s)"
 
-  if echo "$LOG_LAST_30S" | grep -q "Joining round"; then
+  if echo "$LOG_LAST_30S" | grep -q "Already finished round"; then
     last_detect_time="$now"
     if [ "$CURRENT_INDEX" -gt "$MAX_FOLDER" ]; then
       CURRENT_INDEX=1
     fi
-    log "Phát hiện Joining round → chuyển folder $CURRENT_INDEX - ${RANDOM_BOOTNODE:-unknown}"
+    log "Phát hiện Already finished round → chuyển folder $CURRENT_INDEX - ${RANDOM_BOOTNODE:-unknown}"
     copy_and_restart "$CURRENT_INDEX" || true
     CURRENT_INDEX=$((CURRENT_INDEX+1))
   else
