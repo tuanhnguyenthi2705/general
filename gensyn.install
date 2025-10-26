@@ -342,28 +342,50 @@ TIMEOUT_SECONDS=600
 last_detect_time="$(date +%s)"
 
 while true; do
-  LOG_LAST_30S="$(journalctl -u rl-swarm --since "30 seconds ago" -o cat 2>/dev/null || true)"
-  now="$(date +%s)"
+    LOG_LAST_30S=$(journalctl -u rl-swarm --since "30 seconds ago" -o cat 2>/dev/null || echo "")
+    current_time=$(date +%s)
 
-  if echo "$LOG_LAST_30S" | grep -q "Joining round"; then
-    last_detect_time="$now"
-    # tìm folder tiếp theo hợp lệ khi có tín hiệu joining round
-    if [ "$CURRENT_INDEX" -gt "$MAX_FOLDER" ]; then CURRENT_INDEX=1; fi
-    log "Phát hiện Joining round → chuyển folder $CURRENT_INDEX - ${RANDOM_BOOTNODE:-unknown}"
-    # nếu folder kế tiếp không hợp lệ, quét tiếp cho tới khi hợp lệ
-    VALID_INDEX="$(scan_until_ok "$CURRENT_INDEX")"
-    CURRENT_INDEX="$(next_index "$VALID_INDEX")"
-  else
-    if [ $((now - last_detect_time)) -ge $TIMEOUT_SECONDS ]; then
-      if [ "$CURRENT_INDEX" -gt "$MAX_FOLDER" ]; then CURRENT_INDEX=1; fi
-      log "TIMEOUT → chuyển folder $CURRENT_INDEX - ${RANDOM_BOOTNODE:-unknown}"
-      VALID_INDEX="$(scan_until_ok "$CURRENT_INDEX")"
-      CURRENT_INDEX="$(next_index "$VALID_INDEX")"
-      last_detect_time="$now"
+    if echo "$LOG_LAST_30S" | grep -q "Joining round"; then
+        last_detect_time=$current_time
+
+        if (( CURRENT_INDEX > MAX_FOLDER )); then
+            CURRENT_INDEX=1
+        fi
+
+        echo "Folder $CURRENT_INDEX | $RANDOM_BOOTNODE"
+        copy_and_restart "$CURRENT_INDEX"
+        
+        # Luu index tiep theo
+        NEXT_INDEX=$((CURRENT_INDEX + 1))
+        if (( NEXT_INDEX > MAX_FOLDER )); then
+            NEXT_INDEX=1
+        fi
+        echo "$NEXT_INDEX" > "$STATE_FILE"
+        
+        CURRENT_INDEX=$NEXT_INDEX
+    else
+        if (( current_time - last_detect_time >= TIMEOUT_SECONDS )); then
+            echo "Error, chuyen folder $CURRENT_INDEX - $RANDOM_BOOTNODE"
+
+            if (( CURRENT_INDEX > MAX_FOLDER )); then
+                CURRENT_INDEX=1
+            fi
+
+            copy_and_restart "$CURRENT_INDEX"
+            
+            # Luu index tiep theo
+            NEXT_INDEX=$((CURRENT_INDEX + 1))
+            if (( NEXT_INDEX > MAX_FOLDER )); then
+                NEXT_INDEX=1
+            fi
+            echo "$NEXT_INDEX" > "$STATE_FILE"
+            
+            CURRENT_INDEX=$NEXT_INDEX
+            last_detect_time=$current_time
+        fi
     fi
-  fi
 
-  sleep 20
+    sleep 20
 done
 AUTORUN_EOF
 
