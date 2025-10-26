@@ -1,64 +1,3 @@
-#!/bin/bash
-set -euo pipefail
-trap 'echo "[ERROR] Failed at line $LINENO"; exit 1' ERR
-
-# ========================= Detect USER_HOME safely =========================
-LOGNAME=$(logname 2>/dev/null || true)
-[ -z "${LOGNAME:-}" ] && LOGNAME="${SUDO_USER:-root}"
-if [ "$LOGNAME" = "root" ]; then
-  USER_HOME="/root"
-else
-  USER_HOME="/home/$LOGNAME"
-fi
-
-# ========================= Data dir =========================
-mkdir -p "/home/xtr01/gensyn/run"
-BASE_RUN="/home/xtr01/gensyn/run"
-
-# ===================== SERVICE: rl-swarm =====================
-cat << 'EOF' > /etc/systemd/system/rl-swarm.service
-[Unit]
-Description=RL Swarm Service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/root/rl-swarm
-ExecStart=/bin/bash -lc 'source /root/rl-swarm/.venv/bin/activate && ./run_first.sh'
-Restart=always
-RestartSec=5
-User=root
-Environment=PYTHONUNBUFFERED=1
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# ===================== SERVICE: rl-swarm2 =====================
-cat << 'EOF' > /etc/systemd/system/rl-swarm2.service
-[Unit]
-Description=Auto Run Gensyn Script (folder cycler)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/root
-ExecStart=/home/xtr01/gensyn/run/auto.run
-Restart=always
-RestartSec=10
-Environment=LOGNAME=root
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
 # ===================== SCRIPT: auto.run =====================
 # Lưu ý: marker kết thúc here-doc PHẢI là 'AUTORUN_EOF' đứng một mình, không thụt lề, có newline sau đó.
 cat > /home/xtr01/gensyn/run/auto.run <<'AUTORUN_EOF'
@@ -79,7 +18,7 @@ log() { printf "%s - %s\n" "$(date '+%F %T')" "$*"; }
 MAX_FOLDER="$(find "$BASE_DIR" -maxdepth 1 -type d -regex '.*/[0-9]+' -printf '%f\n' | sort -n | tail -1 || true)"
 MAX_FOLDER="${MAX_FOLDER:-1}"
 if ! [[ "$MAX_FOLDER" =~ ^[0-9]+$ ]]; then MAX_FOLDER=1; fi
-log "Phát hiện tối đa $MAX_FOLDER, sẽ xoay vòng 1..$MAX_FOLDER"
+log "Phát hiện tối đa $MAX_FOLDER → cho phép chọn khoảng [START..END]"
 
 # --------- Ensure jq exists (for JSON parsing) ----------
 if ! command -v jq >/dev/null 2>&1; then
@@ -93,18 +32,19 @@ folder_has_required() {
   [ -f "$BASE_DIR/$idx/swarm.pem" ] && [ -d "$BASE_DIR/$idx/temp-data" ]
 }
 
-next_valid_index() {
-  # Tìm thư mục hợp lệ kể từ start (bao gồm start); nếu không có → trả rỗng
+next_valid_in_range() {
+  # Tìm thư mục hợp lệ kể từ start (bao gồm start) trong khoảng [RANGE_START..RANGE_END]; vòng tròn trong khoảng
   local start="$1"
-  local i tries
-  i="$start"
-  tries=0
-  while [ "$tries" -lt "$MAX_FOLDER" ]; do
+  local i="$start"
+  local tries=0
+  local span=$(( RANGE_END - RANGE_START + 1 ))
+  while [ "$tries" -lt "$span" ]; do
     if folder_has_required "$i"; then
       echo "$i"
       return 0
     fi
-    i=$(( i % MAX_FOLDER + 1 ))
+    # tăng trong khoảng
+    if [ "$i" -ge "$RANGE_END" ]; then i="$RANGE_START"; else i=$((i+1)); fi
     tries=$((tries+1))
   done
   echo ""
@@ -117,7 +57,6 @@ update_bootnode() {
     log "CẢNH BÁO: $BOOTNODES_FILE không tồn tại/đang rỗng; giữ bootnode cũ"
     return 0
   fi
-
   local pick
   pick="$(grep -v '^[[:space:]]*$' "$BOOTNODES_FILE" | shuf -n 1 || true)"
   if [ -z "${pick:-}" ]; then
@@ -252,7 +191,7 @@ copy_and_restart() {
     [ -f "$APIKEY1" ] && APIKEY="$APIKEY1"
     [ -z "$APIKEY" ] && [ -f "$APIKEY2" ] && APIKEY="$APIKEY2"
 
-    if [ -n "$APIKEY" ] && jq -e . "$APIKEY" >/dev/null 2>&1; then
+    if [ -n "$APIKEY" ] && jq -e . "$APIKEY" >/div/null 2>&1; then
       local KEY_OK=1
       jq -e --arg O "$ORG_ID" '
         ( .[$O][0].activated == true )
@@ -295,71 +234,82 @@ copy_and_restart() {
   fi
 }
 
-# --------- Select starting folder (5s timeout) ----------
-read_start_index() {
-  local default=1
-  local input=""
-  echo -n "Nhập thư mục bắt đầu (1..$MAX_FOLDER), mặc định sau 5s = $default: "
-  # shellcheck disable=SC2162
-  if read -r -t 5 input; then
-    :
-  else
-    input="$default"
-    echo "$input"
-  fi
-
-  # Sanity & clamp
-  if ! [[ "$input" =~ ^[0-9]+$ ]]; then
-    input="$default"
-  fi
-  if [ "$input" -lt 1 ]; then input=1; fi
-  if [ "$input" -gt "$MAX_FOLDER" ]; then input="$MAX_FOLDER"; fi
-  echo "$input"
+# --------- Input with 5s timeout (START & END) ----------
+read_num_with_timeout() {
+  local prompt="$1" default="$2"
+  local val=""
+  echo -n "$prompt (mặc định sau 5s = $default): "
+  if read -r -t 5 val; then :; else val="$default"; echo "$val"; fi
+  # chỉ lấy số
+  if ! [[ "$val" =~ ^[0-9]+$ ]]; then val="$default"; fi
+  echo "$val"
 }
 
-# ======== Main startup: find first valid folder ========
-START_INDEX="$(read_start_index)"
-VALID_START="$(next_valid_index "$START_INDEX" || true)"
+# ======== Read range [RANGE_START..RANGE_END] ========
+DEFAULT_START=1
+DEFAULT_END="$MAX_FOLDER"
 
+IN_START="$(read_num_with_timeout "Nhập thư mục BẮT ĐẦU [1..$MAX_FOLDER]" "$DEFAULT_START")"
+IN_END="$(read_num_with_timeout "Nhập thư mục KẾT THÚC [1..$MAX_FOLDER]" "$DEFAULT_END")"
+
+# clamp & normalize
+[ "$IN_START" -lt 1 ] && IN_START=1
+[ "$IN_START" -gt "$MAX_FOLDER" ] && IN_START="$MAX_FOLDER"
+[ "$IN_END" -lt 1 ] && IN_END=1
+[ "$IN_END" -gt "$MAX_FOLDER" ] && IN_END="$MAX_FOLDER"
+if [ "$IN_START" -gt "$IN_END" ]; then
+  t="$IN_START"; IN_START="$IN_END"; IN_END="$t"
+fi
+RANGE_START="$IN_START"
+RANGE_END="$IN_END"
+log "Khoảng chạy: [$RANGE_START..$RANGE_END]"
+
+# ======== Start on first valid in range ========
+VALID_START="$(next_valid_in_range "$RANGE_START" || true)"
 if [ -z "${VALID_START:-}" ]; then
-  log "KHÔNG tìm được bất kỳ thư mục hợp lệ (1..$MAX_FOLDER) — kiểm tra lại dữ liệu!"
-  # vẫn thử chạy 1 để sinh log
-  VALID_START=1
+  log "KHÔNG tìm được thư mục hợp lệ trong [$RANGE_START..$RANGE_END] — kiểm tra lại dữ liệu!"
+  VALID_START="$RANGE_START"   # vẫn chạy để sinh log
 fi
 
 log "Khởi động với folder $VALID_START"
 copy_and_restart "$VALID_START" || true
-
-# Chuẩn bị chỉ số kế tiếp
-CURRENT_INDEX=$(( VALID_START % MAX_FOLDER + 1 ))
+CURRENT_INDEX=$(( (VALID_START < RANGE_END) ? (VALID_START+1) : RANGE_START ))
 TIMEOUT_SECONDS=600
-last_detect_time="$(date +%s)"
 
-# ======== Main loop: watch logs & rotate ========
+# Mốc thời gian để đảm bảo 'Joining round' chỉ tính cho THƯ MỤC ĐANG CHẠY
+CURRENT_STARTED_AT="$(date +%s)"
+last_detect_time="$CURRENT_STARTED_AT"
+
+# ======== Main loop ========
 while true; do
-  LOG_LAST_30S="$(journalctl -u rl-swarm --since "30 seconds ago" -o cat 2>/dev/null || true)"
   now="$(date +%s)"
+  # Chỉ xét log sau khi folder hiện tại thực sự bắt đầu, và trong 30s gần nhất
+  SINCE_TS=$(( CURRENT_STARTED_AT > (now-30) ? CURRENT_STARTED_AT : (now-30) ))
+  LOG_RECENT="$(journalctl -u rl-swarm --since "@$SINCE_TS" -o cat 2>/dev/null || true)"
 
-  rotate_from_current() {
+  rotate_within_range() {
+    # tìm ứng viên hợp lệ trong khoảng
     local cand
-    cand="$(next_valid_index "$CURRENT_INDEX" || true)"
+    cand="$(next_valid_in_range "$CURRENT_INDEX" || true)"
     if [ -z "${cand:-}" ]; then
-      # Không có thư mục hợp lệ, vẫn cố thử CURRENT_INDEX để sinh log
       cand="$CURRENT_INDEX"
-      log "CẢNH BÁO: không tìm được thư mục hợp lệ; thử chạy tạm folder $cand"
+      log "CẢNH BÁO: không tìm được thư mục hợp lệ trong khoảng; thử chạy tạm $cand"
     fi
     log "Chuyển folder $cand - ${RANDOM_BOOTNODE:-unknown}"
     copy_and_restart "$cand" || true
-    CURRENT_INDEX=$(( cand % MAX_FOLDER + 1 ))
-    last_detect_time="$now"
+    # cập nhật con trỏ trong khoảng
+    if [ "$cand" -ge "$RANGE_END" ]; then CURRENT_INDEX="$RANGE_START"; else CURRENT_INDEX=$((cand+1)); fi
+    CURRENT_STARTED_AT="$(date +%s)"
+    last_detect_time="$CURRENT_STARTED_AT"
   }
 
-  if echo "$LOG_LAST_30S" | grep -q "Joining round"; then
-    rotate_from_current
+  if echo "$LOG_RECENT" | grep -q "Joining round"; then
+    # chỉ xoay khi thật sự có 'Joining round' SAU khi start folder hiện tại
+    rotate_within_range
   else
     if [ $((now - last_detect_time)) -ge $TIMEOUT_SECONDS ]; then
       log "TIMEOUT $TIMEOUT_SECONDS giây"
-      rotate_from_current
+      rotate_within_range
     fi
   fi
 
@@ -369,84 +319,3 @@ AUTORUN_EOF
 
 # Ensure executable
 chmod +x /home/xtr01/gensyn/run/auto.run
-
-# ===================== systemd reload =====================
-systemctl daemon-reload
-
-# ===================== Cron restart rl-swarm2 (every ~3h) =====================
-CRON_CMD="0 2,5,8,11,14,17,20,23 * * * systemctl restart rl-swarm2"
-CRON_COMMENT="# Auto restart rl-swarm2 every 3 hours"
-CURRENT_CRON="$(crontab -l 2>/dev/null || true)"
-if echo "$CURRENT_CRON" | grep -qF "systemctl restart rl-swarm2"; then
-  UPDATED_CRON="$(echo "$CURRENT_CRON" | grep -vF "systemctl restart rl-swarm2" | grep -vF "Auto restart rl-swarm2")"
-  if [ -z "$UPDATED_CRON" ]; then
-    (echo "$CRON_COMMENT"; echo "$CRON_CMD") | crontab -
-  else
-    (echo "$UPDATED_CRON"; echo ""; echo "$CRON_COMMENT"; echo "$CRON_CMD") | crontab -
-  fi
-else
-  if [ -z "$CURRENT_CRON" ]; then
-    (echo "$CRON_COMMENT"; echo "$CRON_CMD") | crontab -
-  else
-    (echo "$CURRENT_CRON"; echo ""; echo "$CRON_COMMENT"; echo "$CRON_CMD") | crontab -
-  fi
-fi
-
-# ===================== Install base packages =====================
-echo "BAT DAU CAI DAT CAC PACKAGE CAN THIET"
-PACKAGES="screen curl iptables build-essential git wget lz4 jq make gcc nano automake autoconf tmux htop nvme-cli libgbm1 pkg-config libssl-dev libleveldb-dev tar clang bsdmainutils ncdu unzip python3 python3-pip python3-venv ca-certificates"
-MISSING=""
-for pkg in $PACKAGES; do
-  dpkg -l | grep -q "^ii  $pkg " || MISSING="$MISSING $pkg"
-done
-if [ -n "$MISSING" ]; then
-  apt-get update
-  apt-get install -y $MISSING
-fi
-
-# ===================== Node.js & Yarn via Corepack =====================
-if command -v node >/dev/null 2>&1; then
-  NODE_MAJOR="$(node -v | cut -d'.' -f1 | sed 's/v//')"
-  if [ "$NODE_MAJOR" -lt 22 ]; then
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    apt-get install -y nodejs
-  fi
-else
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-  apt-get install -y nodejs
-fi
-
-corepack enable
-corepack prepare yarn@4 --activate
-yarn -v || { echo "Yarn chưa sẵn sàng"; exit 1; }
-
-# ===================== rl-swarm clone/sync & venv =====================
-RL_SWARM_DIR="/root/rl-swarm"
-if [ ! -d "$RL_SWARM_DIR" ]; then
-  cd /root
-  git clone https://github.com/hiepntnaa/rl-swarm/
-fi
-
-cd "$RL_SWARM_DIR"
-if [ ! -d ".venv" ]; then
-  python3 -m venv .venv
-fi
-
-set +e
-source .venv/bin/activate 2>/dev/null
-pip install -U pip >/dev/null 2>&1
-[ -f requirements.txt ] && pip install -r requirements.txt || true
-deactivate 2>/dev/null || true
-set -e
-
-# ===================== Bootnodes & sync code =====================
-wget -q -O /home/xtr01/gensyn/run/bootnodes.txt https://raw.githubusercontent.com/thanhminguyen/general/refs/heads/main/bootnodes.txt || true
-cd "$RL_SWARM_DIR" && git fetch origin && git reset --hard origin/main
-
-# ===================== Final hints =====================
-echo
-echo -e "\e[92mĐể chạy tay lần đầu: cd /root/rl-swarm && . .venv/bin/activate && ./run_first.sh\e[0m"
-echo
-echo -e "\e[92mSau khi node bắt đầu training → bật dịch vụ:\e[0m"
-echo -e "\e[92msystemctl enable rl-swarm rl-swarm2 && systemctl restart rl-swarm2\e[0m"
-echo
