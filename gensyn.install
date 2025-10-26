@@ -12,7 +12,7 @@ else
 fi
 
 # ========================= Data dir =========================
-mkdir -p "/home/xtr01/gensyn/run"  # thống nhất dùng /root để tránh lệch quyền/đường dẫn
+mkdir -p "/home/xtr01/gensyn/run"
 BASE_RUN="/home/xtr01/gensyn/run"
 
 # ===================== SERVICE: rl-swarm =====================
@@ -67,8 +67,8 @@ cat > /home/xtr01/gensyn/run/auto.run <<'AUTORUN_EOF'
 set -euo pipefail
 
 # --------- Config paths ----------
-BASE_DIR="/home/xtr01/gensyn/run"          # source: /home/xtr01/gensyn/run/<idx>/
-TARGET_DIR="/root/rl-swarm"          # rl-swarm repo
+BASE_DIR="/home/xtr01/gensyn/run"   # source: /home/xtr01/gensyn/run/<idx>/
+TARGET_DIR="/root/rl-swarm"         # rl-swarm repo
 LOGIN_SUBDIR="modal-login"
 BOOTNODES_FILE="$BASE_DIR/bootnodes.txt"
 CONFIG_FILE="$TARGET_DIR/rgym_exp/config/rg-swarm.yaml"
@@ -79,7 +79,8 @@ log() { printf "%s - %s\n" "$(date '+%F %T')" "$*"; }
 # --------- Detect max numeric folder 1..N ----------
 MAX_FOLDER="$(find "$BASE_DIR" -maxdepth 1 -type d -regex '.*/[0-9]+' -printf '%f\n' | sort -n | tail -1 || true)"
 MAX_FOLDER="${MAX_FOLDER:-1}"
-log "Phát hiện $MAX_FOLDER folder, sẽ lặp 1..$MAX_FOLDER"
+if ! [[ "$MAX_FOLDER" =~ ^[0-9]+$ ]]; then MAX_FOLDER=1; fi
+log "Phát hiện tối đa folder số: $MAX_FOLDER"
 
 # --------- Ensure jq exists (for JSON parsing) ----------
 if ! command -v jq >/dev/null 2>&1; then
@@ -192,8 +193,6 @@ copy_and_restart() {
   fi
 
   # Robust orgId extraction:
-  # 1) any .orgId at any depth
-  # 2) fallback: first top-level key (matches common structure)
   local ORG_ID
   ORG_ID="$(jq -r '(.. | objects | .orgId? // empty) | select(type=="string")' "$USERDATA" 2>/dev/null | head -n1 || true)"
   if [ -z "${ORG_ID:-}" ]; then
@@ -231,9 +230,6 @@ copy_and_restart() {
     [ -z "$APIKEY" ] && [ -f "$APIKEY2" ] && APIKEY="$APIKEY2"
 
     if [ -n "$APIKEY" ] && jq -e . "$APIKEY" >/dev/null 2>&1; then
-      # Điều kiện coi là activated:
-      #   a) .[ORG_ID][0].activated == true  (ƯU TIÊN)
-      #   b) hoặc có cặp publicKey/privateKey không rỗng
       local KEY_OK=1
       jq -e --arg O "$ORG_ID" '
         ( .[$O][0].activated == true )
@@ -274,14 +270,74 @@ copy_and_restart() {
       log "CẢNH BÁO: Không xác nhận được ACTIVATED (API & file key đều chưa hợp lệ theo tiêu chí)"
     fi
   fi
+
+  return 0
 }
 
-# --------- First run with folder 1 ----------
-log "Khởi động với folder 1"
-copy_and_restart 1 || true
+# --------- Utility: tính next index có vòng lặp ----------
+next_index() {
+  local x="$1"
+  x=$((x+1))
+  if [ "$x" -gt "$MAX_FOLDER" ]; then x=1; fi
+  echo "$x"
+}
+
+# --------- Chọn thư mục bắt đầu (5s timeout; mặc định 1) ----------
+choose_start_index() {
+  local default=1
+  local input=""
+  if [ -t 0 ]; then
+    echo
+    echo "Nhập số thư mục bắt đầu (1..$MAX_FOLDER), mặc định $default sau 5 giây:"
+    read -r -t 5 -p "> " input || true
+  else
+    log "Không có TTY (chạy qua systemd?) → dùng mặc định 1"
+  fi
+
+  if [[ -z "$input" ]]; then
+    echo "$default"
+    return
+  fi
+  if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1 ] && [ "$input" -le "$MAX_FOLDER" ]; then
+    echo "$input"
+  else
+    log "Giá trị không hợp lệ: $input → dùng $default"
+    echo "$default"
+  fi
+}
+
+# --------- Quét tới khi chạy được (điều kiện 3) ----------
+scan_until_ok() {
+  local start="$1"
+  local idx="$start"
+  local looped=0
+  while true; do
+    log "Thử khởi chạy với folder $idx ..."
+    if copy_and_restart "$idx"; then
+      log "Khởi chạy thành công với folder $idx"
+      echo "$idx"
+      return 0
+    else
+      log "Folder $idx thiếu file hoặc lỗi khởi chạy → chuyển tiếp"
+      idx="$(next_index "$idx")"
+      # nếu đã vòng qua điểm start thì coi như không tìm thấy folder hợp lệ
+      if [ "$idx" -eq "$start" ]; then
+        looped=$((looped+1))
+        if [ $looped -ge 2 ]; then
+          log "QUÉT 2 VÒNG vẫn không có folder hợp lệ. Ngủ 60s rồi thử lại từ $start."
+          sleep 60
+        fi
+      fi
+    fi
+  done
+}
+
+# --------- Start phase: chọn & quét tới khi chạy được ----------
+START_INDEX="$(choose_start_index)"
+VALID_INDEX="$(scan_until_ok "$START_INDEX")"
+CURRENT_INDEX="$(next_index "$VALID_INDEX")"
 
 # --------- Main loop: watch logs & rotate ----------
-CURRENT_INDEX=2
 TIMEOUT_SECONDS=600
 last_detect_time="$(date +%s)"
 
@@ -291,20 +347,18 @@ while true; do
 
   if echo "$LOG_LAST_30S" | grep -q "Joining round"; then
     last_detect_time="$now"
-    if [ "$CURRENT_INDEX" -gt "$MAX_FOLDER" ]; then
-      CURRENT_INDEX=1
-    fi
+    # tìm folder tiếp theo hợp lệ khi có tín hiệu joining round
+    if [ "$CURRENT_INDEX" -gt "$MAX_FOLDER" ]; then CURRENT_INDEX=1; fi
     log "Phát hiện Joining round → chuyển folder $CURRENT_INDEX - ${RANDOM_BOOTNODE:-unknown}"
-    copy_and_restart "$CURRENT_INDEX" || true
-    CURRENT_INDEX=$((CURRENT_INDEX+1))
+    # nếu folder kế tiếp không hợp lệ, quét tiếp cho tới khi hợp lệ
+    VALID_INDEX="$(scan_until_ok "$CURRENT_INDEX")"
+    CURRENT_INDEX="$(next_index "$VALID_INDEX")"
   else
     if [ $((now - last_detect_time)) -ge $TIMEOUT_SECONDS ]; then
-      if [ "$CURRENT_INDEX" -gt "$MAX_FOLDER" ]; then
-        CURRENT_INDEX=1
-      fi
+      if [ "$CURRENT_INDEX" -gt "$MAX_FOLDER" ]; then CURRENT_INDEX=1; fi
       log "TIMEOUT → chuyển folder $CURRENT_INDEX - ${RANDOM_BOOTNODE:-unknown}"
-      copy_and_restart "$CURRENT_INDEX" || true
-      CURRENT_INDEX=$((CURRENT_INDEX+1))
+      VALID_INDEX="$(scan_until_ok "$CURRENT_INDEX")"
+      CURRENT_INDEX="$(next_index "$VALID_INDEX")"
       last_detect_time="$now"
     fi
   fi
