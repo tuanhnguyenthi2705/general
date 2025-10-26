@@ -12,7 +12,7 @@ else
 fi
 
 # ========================= Data dir =========================
-mkdir -p "/home/xtr01/gensyn/run"  # dùng /home/xtr01 để thống nhất quyền/đường dẫn
+mkdir -p "/home/xtr01/gensyn/run"  # thống nhất dùng /root để tránh lệch quyền/đường dẫn
 BASE_RUN="/home/xtr01/gensyn/run"
 
 # ===================== SERVICE: rl-swarm =====================
@@ -67,64 +67,25 @@ cat > /home/xtr01/gensyn/run/auto.run <<'AUTORUN_EOF'
 set -euo pipefail
 
 # --------- Config paths ----------
-BASE_DIR="/home/xtr01/gensyn/run"   # /home/xtr01/gensyn/run/<idx>/
-TARGET_DIR="/root/rl-swarm"         # rl-swarm repo
+BASE_DIR="/home/xtr01/gensyn/run"          # source: /home/xtr01/gensyn/run/<idx>/
+TARGET_DIR="/root/rl-swarm"          # rl-swarm repo
 LOGIN_SUBDIR="modal-login"
 BOOTNODES_FILE="$BASE_DIR/bootnodes.txt"
 CONFIG_FILE="$TARGET_DIR/rgym_exp/config/rg-swarm.yaml"
 APIDIR="$TARGET_DIR/$LOGIN_SUBDIR/temp-data"
-STATE_FILE="$BASE_DIR/.state_next"
 
 log() { printf "%s - %s\n" "$(date '+%F %T')" "$*"; }
 
 # --------- Detect max numeric folder 1..N ----------
 MAX_FOLDER="$(find "$BASE_DIR" -maxdepth 1 -type d -regex '.*/[0-9]+' -printf '%f\n' | sort -n | tail -1 || true)"
 MAX_FOLDER="${MAX_FOLDER:-1}"
-log "Phát hiện tối đa thư mục số: $MAX_FOLDER"
+log "Phát hiện $MAX_FOLDER folder, sẽ lặp 1..$MAX_FOLDER"
 
 # --------- Ensure jq exists (for JSON parsing) ----------
 if ! command -v jq >/dev/null 2>&1; then
   apt-get update -y >/dev/null 2>&1 || true
   apt-get install -y jq >/dev/null 2>&1 || true
 fi
-
-# --------- Utilities ----------
-in_range() { # arg: idx -> 0/1
-  local idx="$1"
-  [[ "$idx" =~ ^[0-9]+$ ]] || return 1
-  (( idx >= 1 && idx <= MAX_FOLDER ))
-}
-
-folder_ready() { # arg: idx -> 0/1 (có đủ file chưa)
-  local idx="$1"
-  [ -f "$BASE_DIR/$idx/swarm.pem" ] || return 1
-  [ -d "$BASE_DIR/$idx/temp-data" ] || return 1
-  return 0
-}
-
-next_in_range() { # args: cur start end -> echo next (vòng)
-  local cur="$1" s="$2" e="$3"
-  local n=$((cur+1))
-  if (( n > e )); then
-    n="$s"
-  fi
-  echo "$n"
-}
-
-find_first_ready() { # args: start end -> echo idx hoặc rỗng
-  local s="$1" e="$2" i
-  i="$s"
-  local looped=0
-  while (( looped < (e - s + 1) )); do
-    if folder_ready "$i"; then
-      echo "$i"; return 0
-    fi
-    i=$(next_in_range "$i" "$s" "$e")
-    looped=$((looped+1))
-  done
-  echo ""
-  return 1
-}
 
 # --------- Update bootnode inside YAML ----------
 update_bootnode() {
@@ -185,7 +146,7 @@ copy_and_restart() {
     count=$((count+1))
   done
 
-  # Kill leftover Node processes
+  # Kill any leftover Node processes
   pkill -f "yarn start" 2>/dev/null || true
   pkill -f "node.*modal-login" 2>/dev/null || true
   sleep 2
@@ -230,7 +191,9 @@ copy_and_restart() {
     return 1
   fi
 
-  # Robust orgId extraction
+  # Robust orgId extraction:
+  # 1) any .orgId at any depth
+  # 2) fallback: first top-level key (matches common structure)
   local ORG_ID
   ORG_ID="$(jq -r '(.. | objects | .orgId? // empty) | select(type=="string")' "$USERDATA" 2>/dev/null | head -n1 || true)"
   if [ -z "${ORG_ID:-}" ]; then
@@ -243,11 +206,11 @@ copy_and_restart() {
   fi
   log "Đọc ORG_ID = $ORG_ID"
 
-  # ---------- Check API activation + fallback userApiKey.json ----------
+  # ---------- Kiểm tra kích hoạt API + fallback userApiKey.json ----------
   local ok=0
   local RESP STATUS_LOWER
 
-  # Prefer API JSON/text
+  # ƯU TIÊN 1: API JSON/text
   RESP="$(curl -s "http://localhost:3000/api/get-api-key-status?orgId=$ORG_ID" || echo "")"
   if echo "$RESP" | jq -e . >/dev/null 2>&1; then
     STATUS_LOWER="$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null | tr "[:upper:]" "[:lower:]")"
@@ -259,15 +222,18 @@ copy_and_restart() {
     [ "$(echo "$RESP" | tr '[:upper:]' '[:lower:]')" = "activated" ] && { log "API trả activated (text)"; ok=1; }
   fi
 
-  # Fallback: userApiKey.json / apikey.json
+  # ƯU TIÊN 2: Fallback userApiKey.json (đúng schema thực tế)
   if [ $ok -eq 0 ]; then
     local APIKEY1="$APIDIR/userApiKey.json"
-    local APIKEY2="$APIDIR/apikey.json"
+    local APIKEY2="$APIDIR/apikey.json"   # tương thích cũ
     local APIKEY=""
     [ -f "$APIKEY1" ] && APIKEY="$APIKEY1"
     [ -z "$APIKEY" ] && [ -f "$APIKEY2" ] && APIKEY="$APIKEY2"
 
     if [ -n "$APIKEY" ] && jq -e . "$APIKEY" >/dev/null 2>&1; then
+      # Điều kiện coi là activated:
+      #   a) .[ORG_ID][0].activated == true  (ƯU TIÊN)
+      #   b) hoặc có cặp publicKey/privateKey không rỗng
       local KEY_OK=1
       jq -e --arg O "$ORG_ID" '
         ( .[$O][0].activated == true )
@@ -285,7 +251,7 @@ copy_and_restart() {
     fi
   fi
 
-  # Poll API tối đa 5 phút nếu vẫn chưa ok
+  # Nếu vẫn chưa ok → poll API tối đa 5 phút như cũ
   if [ $ok -eq 0 ]; then
     local api_timeout=300
     local api_elapsed=0
@@ -293,7 +259,7 @@ copy_and_restart() {
       RESP="$(curl -s "http://localhost:3000/api/get-api-key-status?orgId=$ORG_ID" || echo "")"
       if echo "$RESP" | jq -e . >/dev/null 2>&1; then
         STATUS_LOWER="$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null | tr "[:upper:]" "[:lower:]")"
-        if [ "$STATUS_LOOWER" = "activated" ]; then
+        if [ "$STATUS_LOWER" = "activated" ]; then
           log "API key đã kích hoạt (poll)"
           ok=1
           break
@@ -310,95 +276,60 @@ copy_and_restart() {
   fi
 }
 
-# --------- Prompt chọn phạm vi (5s) ----------
-START=1
-END="$MAX_FOLDER"
-read -r -t 5 -p "Nhập phạm vi thư mục START-END (vd 5-20). Mặc định 1-$MAX_FOLDER sau 5s: " RANGE || true
-if [[ "${RANGE:-}" =~ ^[0-9]+-[0-9]+$ ]]; then
-  START="${RANGE%-*}"
-  END="${RANGE#*-}"
-fi
-
-# Chuẩn hoá phạm vi
-in_range "$START" || START=1
-in_range "$END"   || END="$MAX_FOLDER"
-if (( START > END )); then
-  local_tmp="$START"; START="$END"; END="$local_tmp"
-fi
-log "Sẽ lặp trong phạm vi: $START..$END"
-
-# Thử đọc state cũ nếu còn hợp lệ trong phạm vi
-if [ -f "$STATE_FILE" ]; then
-  NXT="$(cat "$STATE_FILE" 2>/dev/null || true)"
-  if [[ "$NXT" =~ ^[0-9]+$ ]] && (( NXT >= START && NXT <= END )); then
-    CURRENT_INDEX="$NXT"
-  else
-    CURRENT_INDEX="$START"
-  fi
-else
-  CURRENT_INDEX="$START"
-fi
-
-# --------- Chọn folder hợp lệ đầu tiên để khởi động ----------
-FIRST_READY="$(find_first_ready "$START" "$END")" || true
-if [ -z "$FIRST_READY" ]; then
-  log "KHÔNG CÓ THƯ MỤC NÀO ĐỦ FILE TRONG PHẠM VI $START..$END. Chờ 60s rồi thử lại."
-  sleep 60
-else
-  log "Khởi động với folder $FIRST_READY"
-  copy_and_restart "$FIRST_READY" || true
-  CURRENT_INDEX="$(next_in_range "$FIRST_READY" "$START" "$END")"
-  echo "$CURRENT_INDEX" > "$STATE_FILE"
-fi
+# --------- First run with folder 1 ----------
+log "Khởi động với folder 1"
+copy_and_restart 1 || true
 
 # --------- Main loop: watch logs & rotate ----------
+CURRENT_INDEX=2
 TIMEOUT_SECONDS=600
 last_detect_time="$(date +%s)"
 
 while true; do
-  LOG_LAST_30S=$(journalctl -u rl-swarm --since "30 seconds ago" -o cat 2>/dev/null || echo "")
-  current_time=$(date +%s)
+    LOG_LAST_30S=$(journalctl -u rl-swarm --since "30 seconds ago" -o cat 2>/dev/null || echo "")
+    current_time=$(date +%s)
 
-  if echo "$LOG_LAST_30S" | grep -q "Joining round"; then
-    last_detect_time=$current_time
+    if echo "$LOG_LAST_30S" | grep -q "Joining round"; then
+        last_detect_time=$current_time
 
-    # tìm thư mục hợp lệ kế tiếp trong phạm vi
-    tries=0
-    candidate="$CURRENT_INDEX"
-    while (( tries < (END - START + 1) )); do
-      if folder_ready "$candidate"; then
-        echo "Folder $candidate | $RANDOM_BOOTNODE"
-        copy_and_restart "$candidate" || { candidate=$(next_in_range "$candidate" "$START" "$END"); tries=$((tries+1)); continue; }
-        # lưu next
-        CURRENT_INDEX="$(next_in_range "$candidate" "$START" "$END")"
-        echo "$CURRENT_INDEX" > "$STATE_FILE"
-        break
-      fi
-      candidate="$(next_in_range "$candidate" "$START" "$END")"
-      tries=$((tries+1))
-    done
-
-  else
-    if (( current_time - last_detect_time >= TIMEOUT_SECONDS )); then
-      log "Timeout $TIMEOUT_SECONDS giây, chuyển folder $CURRENT_INDEX - $RANDOM_BOOTNODE"
-      # giống block trên nhưng không cần đợi Joining round
-      tries=0
-      candidate="$CURRENT_INDEX"
-      while (( tries < (END - START + 1) )); do
-        if folder_ready "$candidate"; then
-          copy_and_restart "$candidate" || { candidate=$(next_in_range "$candidate" "$START" "$END"); tries=$((tries+1)); continue; }
-          CURRENT_INDEX="$(next_in_range "$candidate" "$START" "$END")"
-          echo "$CURRENT_INDEX" > "$STATE_FILE"
-          last_detect_time=$current_time
-          break
+        if (( CURRENT_INDEX > MAX_FOLDER )); then
+            CURRENT_INDEX=1
         fi
-        candidate="$(next_in_range "$candidate" "$START" "$END")"
-        tries=$((tries+1))
-      done
-    fi
-  fi
 
-  sleep 20
+        echo "Folder $CURRENT_INDEX | $RANDOM_BOOTNODE"
+        copy_and_restart "$CURRENT_INDEX"
+        
+        # Luu index tiep theo
+        NEXT_INDEX=$((CURRENT_INDEX + 1))
+        if (( NEXT_INDEX > MAX_FOLDER )); then
+            NEXT_INDEX=1
+        fi
+        echo "$NEXT_INDEX" > "$STATE_FILE"
+        
+        CURRENT_INDEX=$NEXT_INDEX
+    else
+        if (( current_time - last_detect_time >= TIMEOUT_SECONDS )); then
+            echo "Error, chuyen folder $CURRENT_INDEX - $RANDOM_BOOTNODE"
+
+            if (( CURRENT_INDEX > MAX_FOLDER )); then
+                CURRENT_INDEX=1
+            fi
+
+            copy_and_restart "$CURRENT_INDEX"
+            
+            # Luu index tiep theo
+            NEXT_INDEX=$((CURRENT_INDEX + 1))
+            if (( NEXT_INDEX > MAX_FOLDER )); then
+                NEXT_INDEX=1
+            fi
+            echo "$NEXT_INDEX" > "$STATE_FILE"
+            
+            CURRENT_INDEX=$NEXT_INDEX
+            last_detect_time=$current_time
+        fi
+    fi
+
+    sleep 20
 done
 AUTORUN_EOF
 
