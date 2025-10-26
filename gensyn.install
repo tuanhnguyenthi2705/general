@@ -1,8 +1,6 @@
-# ===================== SCRIPT: auto.run =====================
-# Lưu ý: marker kết thúc here-doc PHẢI là 'AUTORUN_EOF' đứng một mình, không thụt lề, có newline sau đó.
-cat > /home/xtr01/gensyn/run/auto.run <<'AUTORUN_EOF'
 #!/bin/bash
 set -euo pipefail
+export LC_ALL=C LANG=C
 
 # --------- Config paths ----------
 BASE_DIR="/home/xtr01/gensyn/run"    # /home/xtr01/gensyn/run/<idx>/
@@ -17,7 +15,7 @@ log() { printf "%s - %s\n" "$(date '+%F %T')" "$*"; }
 # --------- Detect max numeric folder 1..N ----------
 MAX_FOLDER="$(find "$BASE_DIR" -maxdepth 1 -type d -regex '.*/[0-9]+' -printf '%f\n' | sort -n | tail -1 || true)"
 MAX_FOLDER="${MAX_FOLDER:-1}"
-if ! [[ "$MAX_FOLDER" =~ ^[0-9]+$ ]]; then MAX_FOLDER=1; fi
+[[ "$MAX_FOLDER" =~ ^[0-9]+$ ]] || MAX_FOLDER=1
 log "Phát hiện tối đa $MAX_FOLDER → cho phép chọn khoảng [START..END]"
 
 # --------- Ensure jq exists (for JSON parsing) ----------
@@ -26,7 +24,7 @@ if ! command -v jq >/dev/null 2>&1; then
   apt-get install -y jq >/dev/null 2>&1 || true
 fi
 
-# --------- Helpers: valid folder detection ----------
+# --------- Helpers ----------
 folder_has_required() {
   local idx="$1"
   [ -f "$BASE_DIR/$idx/swarm.pem" ] && [ -d "$BASE_DIR/$idx/temp-data" ]
@@ -40,18 +38,17 @@ next_valid_in_range() {
   local span=$(( RANGE_END - RANGE_START + 1 ))
   while [ "$tries" -lt "$span" ]; do
     if folder_has_required "$i"; then
-      echo "$i"
+      printf '%s\n' "$i"
       return 0
     fi
-    # tăng trong khoảng
     if [ "$i" -ge "$RANGE_END" ]; then i="$RANGE_START"; else i=$((i+1)); fi
     tries=$((tries+1))
   done
-  echo ""
+  printf '%s\n' ""
   return 1
 }
 
-# --------- Update bootnode inside YAML ----------
+# --------- Update bootnode ----------
 update_bootnode() {
   if [ ! -s "$BOOTNODES_FILE" ]; then
     log "CẢNH BÁO: $BOOTNODES_FILE không tồn tại/đang rỗng; giữ bootnode cũ"
@@ -171,19 +168,14 @@ copy_and_restart() {
   local ok=0
   local RESP STATUS_LOWER
 
-  # ƯU TIÊN 1: API JSON/text
   RESP="$(curl -s "http://localhost:3000/api/get-api-key-status?orgId=$ORG_ID" || echo "")"
   if echo "$RESP" | jq -e . >/dev/null 2>&1; then
     STATUS_LOWER="$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null | tr "[:upper:]" "[:lower:]")"
-    if [ "$STATUS_LOWER" = "activated" ]; then
-      log "API trả trạng thái activated"
-      ok=1
-    fi
+    [ "$STATUS_LOWER" = "activated" ] && { log "API trả trạng thái activated"; ok=1; }
   else
     [ "$(echo "$RESP" | tr '[:upper:]' '[:lower:]')" = "activated" ] && { log "API trả activated (text)"; ok=1; }
   fi
 
-  # ƯU TIÊN 2: Fallback userApiKey.json
   if [ $ok -eq 0 ]; then
     local APIKEY1="$APIDIR/userApiKey.json"
     local APIKEY2="$APIDIR/apikey.json"
@@ -191,13 +183,12 @@ copy_and_restart() {
     [ -f "$APIKEY1" ] && APIKEY="$APIKEY1"
     [ -z "$APIKEY" ] && [ -f "$APIKEY2" ] && APIKEY="$APIKEY2"
 
-    if [ -n "$APIKEY" ] && jq -e . "$APIKEY" >/div/null 2>&1; then
+    if [ -n "$APIKEY" ] && jq -e . "$APIKEY" >/dev/null 2>&1; then
       local KEY_OK=1
       jq -e --arg O "$ORG_ID" '
         ( .[$O][0].activated == true )
         or ( ( .[$O][0].publicKey // "" ) != "" and ( .[$O][0].privateKey // "" ) != "" )
       ' "$APIKEY" >/dev/null 2>&1 || KEY_OK=0
-
       if [ $KEY_OK -eq 1 ]; then
         log "userApiKey.json xác nhận ACTIVATED → bỏ qua chờ API"
         ok=1
@@ -209,7 +200,6 @@ copy_and_restart() {
     fi
   fi
 
-  # Nếu vẫn chưa ok → poll API tối đa 5 phút
   if [ $ok -eq 0 ]; then
     local api_timeout=300
     local api_elapsed=0
@@ -217,40 +207,54 @@ copy_and_restart() {
       RESP="$(curl -s "http://localhost:3000/api/get-api-key-status?orgId=$ORG_ID" || echo "")"
       if echo "$RESP" | jq -e . >/dev/null 2>&1; then
         STATUS_LOWER="$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null | tr "[:upper:]" "[:lower:]")"
-        if [ "$STATUS_LOWER" = "activated" ]; then
-          log "API key đã kích hoạt (poll)"
-          ok=1
-          break
-        fi
+        [ "$STATUS_LOWER" = "activated" ] && { log "API key đã kích hoạt (poll)"; ok=1; break; }
       else
         [ "$(echo "$RESP" | tr '[:upper:]' '[:lower:]')" = "activated" ] && { log "API key đã kích hoạt (poll: text)"; ok=1; break; }
       fi
       sleep 5
       api_elapsed=$((api_elapsed+5))
     done
-    if [ $ok -eq 0 ]; then
-      log "CẢNH BÁO: Không xác nhận được ACTIVATED (API & file key đều chưa hợp lệ theo tiêu chí)"
-    fi
+    [ $ok -eq 0 ] && log "CẢNH BÁO: Không xác nhận được ACTIVATED (API & file key đều chưa hợp lệ theo tiêu chí)"
   fi
 }
 
-# --------- Input with 5s timeout (START & END) ----------
+# --------- Input helpers ----------
 read_num_with_timeout() {
   local prompt="$1" default="$2"
   local val=""
-  echo -n "$prompt (mặc định sau 5s = $default): "
-  if read -r -t 5 val; then :; else val="$default"; echo "$val"; fi
-  # chỉ lấy số
-  if ! [[ "$val" =~ ^[0-9]+$ ]]; then val="$default"; fi
-  echo "$val"
+
+  if [ -t 1 ]; then
+    printf "%s (mặc định sau 5s = %s): " "$prompt" "$default"
+  else
+    log "$prompt (mặc định sau 5s = $default)"
+  fi
+
+  if [ -t 0 ]; then
+    if read -r -t 5 val; then :; else val="$default"; fi
+  else
+    sleep 5
+    val="$default"
+  fi
+
+  val="${val//[^0-9]/}"
+  [ -z "$val" ] && val="$default"
+  printf '%s\n' "$val"
 }
 
-# ======== Read range [RANGE_START..RANGE_END] ========
+# ======== Read/use range [RANGE_START..RANGE_END] ========
 DEFAULT_START=1
 DEFAULT_END="$MAX_FOLDER"
 
-IN_START="$(read_num_with_timeout "Nhập thư mục BẮT ĐẦU [1..$MAX_FOLDER]" "$DEFAULT_START")"
-IN_END="$(read_num_with_timeout "Nhập thư mục KẾT THÚC [1..$MAX_FOLDER]" "$DEFAULT_END")"
+if [ -n "${RANGE_START:-}" ] && [ -n "${RANGE_END:-}" ]; then
+  IN_START="${RANGE_START//[^0-9]/}"
+  IN_END="${RANGE_END//[^0-9]/}"
+  [ -z "$IN_START" ] && IN_START="$DEFAULT_START"
+  [ -z "$IN_END" ] && IN_END="$DEFAULT_END"
+  log "Dùng RANGE từ biến môi trường: [$IN_START..$IN_END]"
+else
+  IN_START="$(read_num_with_timeout "Nhập thư mục BẮT ĐẦU [1..$MAX_FOLDER]" "$DEFAULT_START")"
+  IN_END="$(read_num_with_timeout "Nhập thư mục KẾT THÚC [1..$MAX_FOLDER]" "$DEFAULT_END")"
+fi
 
 # clamp & normalize
 [ "$IN_START" -lt 1 ] && IN_START=1
@@ -288,7 +292,6 @@ while true; do
   LOG_RECENT="$(journalctl -u rl-swarm --since "@$SINCE_TS" -o cat 2>/dev/null || true)"
 
   rotate_within_range() {
-    # tìm ứng viên hợp lệ trong khoảng
     local cand
     cand="$(next_valid_in_range "$CURRENT_INDEX" || true)"
     if [ -z "${cand:-}" ]; then
@@ -297,14 +300,12 @@ while true; do
     fi
     log "Chuyển folder $cand - ${RANDOM_BOOTNODE:-unknown}"
     copy_and_restart "$cand" || true
-    # cập nhật con trỏ trong khoảng
     if [ "$cand" -ge "$RANGE_END" ]; then CURRENT_INDEX="$RANGE_START"; else CURRENT_INDEX=$((cand+1)); fi
     CURRENT_STARTED_AT="$(date +%s)"
     last_detect_time="$CURRENT_STARTED_AT"
   }
 
   if echo "$LOG_RECENT" | grep -q "Joining round"; then
-    # chỉ xoay khi thật sự có 'Joining round' SAU khi start folder hiện tại
     rotate_within_range
   else
     if [ $((now - last_detect_time)) -ge $TIMEOUT_SECONDS ]; then
@@ -315,7 +316,3 @@ while true; do
 
   sleep 20
 done
-AUTORUN_EOF
-
-# Ensure executable
-chmod +x /home/xtr01/gensyn/run/auto.run
