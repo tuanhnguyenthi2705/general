@@ -26,7 +26,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/root/rl-swarm
 # Đổi ./run_first.sh thành script phù hợp nếu bạn muốn
-ExecStart=/bin/bash -lc 'source /root/rl-swarm/.venv/bin/activate && ./run_first.sh'
+ExecStart=/bin/bash -lc 'source /root/rl-swarm/.venv/bin/activate && ./run_rl_swarm.sh'
 Restart=always
 RestartSec=5
 User=root
