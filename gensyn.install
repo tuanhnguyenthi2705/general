@@ -359,7 +359,7 @@ while true; do
   LOG_LAST_30S=$(journalctl -u rl-swarm --since "30 seconds ago" -o cat 2>/dev/null || echo "")
   current_time=$(date +%s)
 
-  if echo "$LOG_LAST_30S" | grep -q "Joining round"; then
+  if echo "$LOG_LAST_30S" | grep -q "submission completed"; then
     last_detect_time=$current_time
 
     # tìm thư mục hợp lệ kế tiếp trong phạm vi
@@ -381,7 +381,7 @@ while true; do
   else
     if (( current_time - last_detect_time >= TIMEOUT_SECONDS )); then
       log "Timeout $TIMEOUT_SECONDS giây, chuyển folder $CURRENT_INDEX - $RANDOM_BOOTNODE"
-      # giống block trên nhưng không cần đợi Joining round
+      # giống block trên nhưng không cần đợi submission completed
       tries=0
       candidate="$CURRENT_INDEX"
       while (( tries < (END - START + 1) )); do
